@@ -1,0 +1,29 @@
+# Environment Variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Database
+sentinelmesh.db
+
+# OS
+.DS_Store
+
+# Dashboard
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/build/
+dashboard/.env
+dashboard/.env.local
+
+# IDE
+.vscode/
+.idea/

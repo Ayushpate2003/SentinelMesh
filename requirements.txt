@@ -1,0 +1,14 @@
+langgraph
+langchain-google-genai
+pydantic>=2.0
+cryptography
+fastapi
+uvicorn
+aiosqlite
+redis
+python-dotenv
+resend
+requests
+mcp
+pytest
+pytest-asyncio
