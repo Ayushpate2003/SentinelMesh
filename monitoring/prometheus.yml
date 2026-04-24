@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: sentinelmesh-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend-full:8002"]
+  - job_name: sentinelmesh-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["worker-full:9101"]

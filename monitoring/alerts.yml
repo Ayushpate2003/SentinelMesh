@@ -1,0 +1,54 @@
+groups:
+  - name: sentinelmesh-alerts
+    rules:
+      - alert: HighQueueDepth
+        expr: sentinelmesh_queue_depth > 100
+        for: 30s
+        labels:
+          severity: critical
+          service: sentinelmesh
+          component: worker
+          severity_emoji: "🔴"
+        annotations:
+          summary: "🔴 CRITICAL: Queue depth too high"
+          description: "Event queue backlog exceeded 100 items"
+          action: "Scale worker replicas and inspect worker errors."
+
+      - alert: DLQGrowth
+        expr: increase(sentinelmesh_dlq_total[1m]) > 5
+        for: 1m
+        labels:
+          severity: critical
+          service: sentinelmesh
+          component: worker
+          severity_emoji: "🔴"
+        annotations:
+          summary: "🔴 CRITICAL: DLQ growing rapidly"
+          description: "More than 5 failed events per minute"
+          action: "Inspect failing payloads in DLQ and worker logs."
+
+      - alert: WorkerFailuresHigh
+        expr: rate(sentinelmesh_worker_errors_total[1m]) > 2
+        for: 1m
+        labels:
+          severity: warning
+          service: sentinelmesh
+          component: worker
+          severity_emoji: "🟠"
+        annotations:
+          summary: "🟠 WARNING: Worker error rate high"
+          description: "Worker processing error rate exceeded 2/sec"
+          action: "Check worker logs and dependency health."
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, sum(rate(sentinelmesh_http_request_latency_seconds_bucket[1m])) by (le)) > 1
+        for: 1m
+        labels:
+          severity: warning
+          service: sentinelmesh
+          component: backend
+          severity_emoji: "🟠"
+        annotations:
+          summary: "🟠 WARNING: API latency high"
+          description: "P95 request latency above 1 second"
+          action: "Inspect backend saturation and queue pressure."

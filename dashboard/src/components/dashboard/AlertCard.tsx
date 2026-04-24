@@ -10,11 +10,12 @@ const severityColors = {
 }
 
 export function AlertCard({ incident }: { incident: any }) {
+  const incidentTime = incident.created_at ?? incident.timestamp
   return (
-    <Card className="glass border-none mb-4 overflow-hidden group hover:scale-[1.01] transition-all">
+    <Card className="glass border-none mb-4 overflow-hidden group hover:scale-[1.01] transition-all text-white">
       <div className={`h-1 w-full ${incident.severity === 'critical' ? 'bg-red-500' : 'bg-primary'}`} />
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium">
+        <CardTitle className="text-sm font-semibold text-white/95">
           {incident.incident_id}
         </CardTitle>
         <Badge variant="outline" className={severityColors[incident.severity as keyof typeof severityColors]}>
@@ -22,15 +23,17 @@ export function AlertCard({ incident }: { incident: any }) {
         </Badge>
       </CardHeader>
       <CardContent>
-        <div className="text-xl font-bold mb-2 group-hover:text-primary transition-colors">{incident.summary}</div>
-        <div className="flex items-center text-xs text-muted-foreground gap-4">
+        <div className="text-base md:text-lg font-semibold mb-2 text-white/95 group-hover:text-primary transition-colors">
+          {incident.summary}
+        </div>
+        <div className="flex items-center text-xs text-white/70 gap-4">
           <span className="flex items-center gap-1">
             <Clock className="w-3 h-3" />
-            {new Date(incident.timestamp * 1000).toLocaleTimeString()}
+            {incidentTime ? new Date(incidentTime * 1000).toLocaleTimeString() : "N/A"}
           </span>
           <span className="flex items-center gap-1">
             <ShieldAlert className="w-3 h-3" />
-            {incident.signals.length} Signals
+            {(incident.signals || []).length} Signals
           </span>
         </div>
       </CardContent>

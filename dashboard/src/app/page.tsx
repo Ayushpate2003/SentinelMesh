@@ -3,13 +3,59 @@
 import { useEffect, useState } from "react"
 import { useDashboardStore } from "@/lib/store"
 import { AlertCard } from "@/components/dashboard/AlertCard"
-import { Shield, Activity, Zap, Lock, List, Terminal, Settings } from "lucide-react"
+import { Shield, Activity, Zap, Lock, List, Terminal, Settings, Play, Square, AlertTriangle } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { API_BASE_URL, WS_BASE_URL } from "@/lib/constants"
 
 export default function DashboardPage() {
   const { incidents, addIncident, setIncidents } = useDashboardStore()
   const [status, setStatus] = useState("connecting")
+  const [runningTest, setRunningTest] = useState<string | null>(null)
+  const [toast, setToast] = useState<{message: string, type: 'success'|'error'} | null>(null)
+  const [systemHealth, setSystemHealth] = useState({
+    queue_depth: 0,
+    dlq_depth: 0,
+    workers_healthy: 0,
+    latency_p95_ms: 0,
+  })
+  const [activeAlerts, setActiveAlerts] = useState<Array<{name: string, severity: string, component: string, status: string, duration_seconds?: number, summary?: string}>>([])
+
+  const showToast = (message: string, type: 'success'|'error' = 'success') => {
+    setToast({ message, type })
+    setTimeout(() => setToast(null), 3000)
+  }
+
+  const handleRunTest = async (type: string) => {
+    try {
+      setRunningTest(type)
+      const res = await fetch(`${API_BASE_URL}/api/v1/run-test/${type}`, { method: 'POST' })
+      const data = await res.json()
+      if (res.ok) {
+        showToast(`Started ${type} simulation`, 'success')
+      } else {
+        showToast(data.detail || 'Failed to start simulation', 'error')
+        setRunningTest(null)
+      }
+    } catch (err) {
+      showToast('Network error while starting simulation', 'error')
+      setRunningTest(null)
+    }
+  }
+
+  const handleStopTests = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/stop-tests`, { method: 'POST' })
+      const data = await res.json()
+      if (res.ok) {
+        showToast(`Stopped simulations: ${data.stopped_tests.join(', ') || 'None'}`, 'success')
+        setRunningTest(null)
+      } else {
+        showToast(data.detail || 'Failed to stop simulations', 'error')
+      }
+    } catch (err) {
+      showToast('Network error while stopping simulations', 'error')
+    }
+  }
 
   useEffect(() => {
     // Fetch initial incidents
@@ -31,8 +77,61 @@ export default function DashboardPage() {
     return () => ws.close()
   }, [])
 
+  const severityEmoji = (severity: string) => {
+    if (severity === "critical") return "🔴"
+    if (severity === "warning") return "🟠"
+    return "🔵"
+  }
+
+  const formatDuration = (seconds?: number) => {
+    const s = seconds ?? 0
+    if (s < 60) return `${s}s`
+    const m = Math.floor(s / 60)
+    const rem = s % 60
+    return `${m}m ${rem}s`
+  }
+
+  useEffect(() => {
+    const fetchAlerts = () => {
+      fetch(`${API_BASE_URL}/api/v1/system/alerts`)
+        .then((res) => res.json())
+        .then((data) => setActiveAlerts(Array.isArray(data.alerts) ? data.alerts : []))
+        .catch(() => setActiveAlerts([]))
+    }
+    fetchAlerts()
+    const interval = setInterval(fetchAlerts, 10000)
+    return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    const fetchHealth = () => {
+      fetch(`${API_BASE_URL}/api/v1/system/health`)
+        .then((res) => res.json())
+        .then((data) => {
+          setSystemHealth({
+            queue_depth: data.queue_depth ?? 0,
+            dlq_depth: data.dlq_depth ?? 0,
+            workers_healthy: data.workers_healthy ?? 0,
+            latency_p95_ms: data.latency_p95_ms ?? 0,
+          })
+        })
+        .catch(() => {})
+    }
+    fetchHealth()
+    const interval = setInterval(fetchHealth, 5000)
+    return () => clearInterval(interval)
+  }, [])
+
   return (
-    <div className="min-h-screen bg-black text-white p-8 font-sans">
+    <div className="min-h-screen bg-background text-foreground p-8 font-sans relative">
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full border ${toast.type === 'success' ? 'bg-green-500/20 border-green-500/50 text-green-400' : 'bg-red-500/20 border-red-500/50 text-red-400'} backdrop-blur-md flex items-center gap-2 animate-in fade-in slide-in-from-top-4`}>
+          {toast.type === 'error' && <AlertTriangle className="w-4 h-4" />}
+          <span className="text-sm font-medium">{toast.message}</span>
+        </div>
+      )}
+
       {/* Header */}
       <header className="flex justify-between items-center mb-12">
         <div>
@@ -92,6 +191,85 @@ export default function DashboardPage() {
                   <div className="text-2xl font-bold">12ms</div>
                   <div className="text-[10px] text-muted-foreground uppercase">Avg Latency</div>
                 </div>
+             </div>
+          </div>
+
+          <div className="glass p-6 rounded-2xl border-primary/20">
+             <h2 className="text-sm font-semibold uppercase tracking-wider mb-4 opacity-80">System Health</h2>
+             <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-muted-foreground">Queue Depth</span><span>{systemHealth.queue_depth}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">DLQ Size</span><span>{systemHealth.dlq_depth}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Workers Healthy</span><span>{systemHealth.workers_healthy}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">P95 Latency</span><span>{Math.round(systemHealth.latency_p95_ms)}ms</span></div>
+             </div>
+          </div>
+
+          <div className="glass p-6 rounded-2xl border-red-500/20">
+             <h2 className="text-sm font-semibold uppercase tracking-wider mb-4 opacity-80">Active Alerts</h2>
+             <div className="space-y-2 text-sm">
+               {activeAlerts.length === 0 ? (
+                 <div className="text-muted-foreground">No active alerts</div>
+               ) : (
+                 activeAlerts.slice(0, 5).map((alert, idx) => (
+                   <div key={`${alert.name}-${idx}`} className="border border-white/10 rounded-lg p-2">
+                     <div className="flex justify-between gap-2">
+                       <span className="truncate">{severityEmoji(alert.severity)} {alert.name}</span>
+                       <span className={`${alert.severity === "critical" ? "text-red-400" : "text-yellow-400"} uppercase`}>{alert.severity}</span>
+                     </div>
+                     <div className="text-xs text-muted-foreground mt-1 flex justify-between">
+                       <span>{alert.status}</span>
+                       <span>for {formatDuration(alert.duration_seconds)}</span>
+                     </div>
+                     <button className="mt-2 text-xs border border-white/20 rounded px-2 py-1 opacity-60 cursor-not-allowed" disabled>
+                       Acknowledge (planned)
+                     </button>
+                   </div>
+                 ))
+               )}
+             </div>
+          </div>
+
+          {/* Attack Simulator Controls */}
+          <div className="glass p-6 rounded-2xl border-orange-500/20">
+             <div className="flex justify-between items-center mb-4">
+               <h2 className="text-sm font-semibold uppercase tracking-wider text-orange-400 flex items-center gap-2">
+                 <AlertTriangle className="w-4 h-4" /> Attack Simulator
+               </h2>
+               {runningTest && (
+                 <button 
+                   onClick={handleStopTests}
+                   className="text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 px-2 py-1 rounded flex items-center gap-1 transition-colors"
+                 >
+                   <Square className="w-3 h-3" /> Stop
+                 </button>
+               )}
+             </div>
+             <div className="space-y-3">
+               {[
+                 { id: 'oauth', label: 'OAuth Attack', color: 'blue' },
+                 { id: 'credential', label: 'Cred Dump', color: 'red' },
+                 { id: 'supply_chain', label: 'Supply Chain', color: 'purple' }
+               ].map(test => (
+                 <button 
+                   key={test.id}
+                   disabled={runningTest !== null && runningTest !== test.id}
+                   onClick={() => handleRunTest(test.id)}
+                   className={`w-full flex items-center justify-between p-3 rounded-xl border transition-all ${
+                     runningTest === test.id 
+                       ? 'bg-orange-500/20 border-orange-500/50 text-orange-400' 
+                       : runningTest !== null
+                         ? 'bg-white/5 border-white/5 opacity-50 cursor-not-allowed'
+                         : 'bg-white/5 border-white/10 hover:bg-white/10'
+                   }`}
+                 >
+                   <span className="text-sm font-medium">{test.label}</span>
+                   {runningTest === test.id ? (
+                     <span className="text-xs uppercase tracking-wider animate-pulse flex items-center gap-1">Running...</span>
+                   ) : (
+                     <Play className="w-4 h-4 opacity-50" />
+                   )}
+                 </button>
+               ))}
              </div>
           </div>
         </div>

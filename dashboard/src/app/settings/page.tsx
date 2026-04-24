@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { API_BASE_URL } from "@/lib/constants"
 
 export default function SettingsPage() {
   const [config, setConfig] = useState<Record<string, string>>({})
@@ -14,7 +15,7 @@ export default function SettingsPage() {
   const [newScope, setNewScope] = useState("")
 
   useEffect(() => {
-    fetch("http://localhost:8000/api/v1/config")
+    fetch(`${API_BASE_URL}/api/v1/config`)
       .then(res => res.json())
       .then(data => {
         setConfig(data)
@@ -29,7 +30,7 @@ export default function SettingsPage() {
   const handleSave = async () => {
     setSaving(true)
     try {
-      const res = await fetch("http://localhost:8000/api/v1/config", {
+      const res = await fetch(`${API_BASE_URL}/api/v1/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
@@ -63,7 +64,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white p-8">
+    <div className="min-h-screen bg-background text-foreground p-8">
       <header className="flex justify-between items-center mb-12">
         <div>
           <h1 className="text-3xl font-bold tracking-tighter flex items-center gap-2">

@@ -15,13 +15,16 @@ logger = logging.getLogger("Supervisor")
 
 class Supervisor:
     def __init__(self):
+        self.light_mode = os.getenv("LIGHT_MODE", "false").lower() == "true"
         self.detector = Detector()
         self.listener = Listener()
         self.gatekeeper = Gatekeeper()
         self.notifier = NotificationService()
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.executor = ThreadPoolExecutor(max_workers=2 if self.light_mode else 5)
+        logger.info("Supervisor initialized | light_mode=%s", self.light_mode)
 
     def process_event(self, event_data: dict, threshold_block: float = 0.8, threshold_queue: float = 0.4) -> IncidentCard:
+        started = time.perf_counter()
         event = SecurityEvent(**event_data)
         logger.info(f"Processing event {event.event_id} from {event.source}")
         
@@ -51,8 +54,16 @@ class Supervisor:
         )
 
         # 4. Send Notifications
-        if self._severity_rank(max_severity) >= self._severity_rank(Severity.HIGH):
+        if not self.light_mode and self._severity_rank(max_severity) >= self._severity_rank(Severity.HIGH):
             self.send_alerts(incident)
+        elif self.light_mode:
+            logger.info("LIGHT_MODE enabled; external alert fanout skipped for %s", incident.incident_id)
+
+        logger.info(
+            "Processed event %s in %.1fms",
+            event.event_id,
+            (time.perf_counter() - started) * 1000,
+        )
 
         return incident
 

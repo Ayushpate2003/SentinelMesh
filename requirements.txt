@@ -9,6 +9,7 @@ redis
 python-dotenv
 resend
 requests
+prometheus-client
 mcp
 pytest
 pytest-asyncio

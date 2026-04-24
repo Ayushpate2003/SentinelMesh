@@ -2,6 +2,7 @@ import os
 import requests
 import logging
 import json
+import time
 from typing import Dict, Any, List, Optional
 from .models import SecurityEvent, ThreatSignal, Severity
 
@@ -11,6 +12,12 @@ class Detector:
     def __init__(self):
         self.vt_api_key = os.getenv("VIRUSTOTAL_API_KEY")
         self.google_api_key = os.getenv("GOOGLE_API_KEY")
+        self.light_mode = os.getenv("LIGHT_MODE", "false").lower() == "true"
+        self.request_timeout_ms = int(os.getenv("REQUEST_TIMEOUT_MS", "500"))
+        self.cb_fail_threshold = int(os.getenv("CB_FAIL_THRESHOLD", "3"))
+        self.cb_cooldown_seconds = int(os.getenv("CB_COOLDOWN_SECONDS", "30"))
+        self.cb_failures = 0
+        self.cb_open_until = 0.0
 
     def analyze(self, event: SecurityEvent) -> List[ThreatSignal]:
         signals = []
@@ -23,7 +30,7 @@ class Detector:
         
         # Add threat intel lookup if there's an IP or File Hash
         indicator = event.metadata.get("ip") or event.metadata.get("file_hash")
-        if indicator:
+        if indicator and not self.light_mode:
             intel = self.threat_intel_lookup(indicator)
             if intel.get("malicious", 0) > 0:
                 signals.append(ThreatSignal(
@@ -35,6 +42,9 @@ class Detector:
                     risk_score=0.9
                 ))
         
+        elif indicator and self.light_mode:
+            logger.info("LIGHT_MODE enabled; skipping threat intel lookup for %s", event.event_id)
+
         return [s for s in signals if s]
 
     def oauth_risk_scorer(self, event: SecurityEvent) -> ThreatSignal:
@@ -122,6 +132,11 @@ class Detector:
         """Looks up an indicator (IP, Hash, Domain) on VirusTotal."""
         if not self.vt_api_key or self.vt_api_key == "your_virustotal_api_key":
             return {"malicious": 0}
+
+        now = time.time()
+        if self.cb_open_until > now:
+            logger.warning("Circuit breaker open; skipping threat intel lookup")
+            return {"malicious": 0, "partial": True, "reason": "circuit_open"}
         
         try:
             # Determine if it's a hash or IP (basic check)
@@ -131,15 +146,25 @@ class Detector:
                 url = f"https://www.virustotal.com/api/v3/ip_addresses/{indicator}"
                 
             headers = {"x-apikey": self.vt_api_key}
-            response = requests.get(url, headers=headers, timeout=5)
+            response = requests.get(url, headers=headers, timeout=self.request_timeout_ms / 1000)
             if response.status_code == 200:
                 data = response.json()
                 stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
                 malicious_count = stats.get("malicious", 0)
+                self.cb_failures = 0
+                self.cb_open_until = 0.0
                 return {"malicious": malicious_count}
             else:
                 logger.warning(f"VirusTotal API error: {response.status_code}")
+                self._record_cb_failure()
                 return {"malicious": 0}
         except Exception as e:
             logger.error(f"Failed to lookup threat intel: {e}")
-            return {"malicious": 0}
+            self._record_cb_failure()
+            return {"malicious": 0, "partial": True, "reason": "lookup_failed"}
+
+    def _record_cb_failure(self):
+        self.cb_failures += 1
+        if self.cb_failures >= self.cb_fail_threshold:
+            self.cb_open_until = time.time() + self.cb_cooldown_seconds
+            logger.warning("Circuit breaker opened for %ss", self.cb_cooldown_seconds)

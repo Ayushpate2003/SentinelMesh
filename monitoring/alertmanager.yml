@@ -1,0 +1,46 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: telegram-default
+  group_by: ["alertname", "severity", "service", "component"]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 10m
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: telegram-critical
+      group_wait: 0s
+      group_interval: 20s
+      repeat_interval: 5m
+    - matchers:
+        - severity="warning"
+      receiver: telegram-warning
+      group_wait: 20s
+      group_interval: 1m
+      repeat_interval: 15m
+
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal:
+      - alertname
+      - service
+      - component
+
+receivers:
+  - name: telegram-default
+    webhook_configs:
+      - url: "http://alertmanager-telegram:8080"
+        send_resolved: true
+  - name: telegram-critical
+    webhook_configs:
+      - url: "http://alertmanager-telegram:8080"
+        send_resolved: true
+  - name: telegram-warning
+    webhook_configs:
+      - url: "http://alertmanager-telegram:8080"
+        send_resolved: true
