@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { API_BASE_URL } from "@/lib/constants"
+import { apiFetch } from "@/lib/api"
 
 export default function SettingsPage() {
   const [config, setConfig] = useState<Record<string, string>>({})
@@ -15,7 +15,7 @@ export default function SettingsPage() {
   const [newScope, setNewScope] = useState("")
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/api/v1/config`)
+    apiFetch(`/api/v1/config`)
       .then(res => res.json())
       .then(data => {
         setConfig(data)
@@ -30,7 +30,7 @@ export default function SettingsPage() {
   const handleSave = async () => {
     setSaving(true)
     try {
-      const res = await fetch(`${API_BASE_URL}/api/v1/config`, {
+      const res = await apiFetch(`/api/v1/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),

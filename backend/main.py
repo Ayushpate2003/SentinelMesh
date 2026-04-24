@@ -1,21 +1,26 @@
 import asyncio
+import base64
 import contextvars
 import datetime
 import json
 import logging
 import os
 import resource
+import secrets
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from contextlib import asynccontextmanager
 from collections import deque
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+import jwt
+import bcrypt
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from redis.asyncio import Redis
 
@@ -64,7 +69,38 @@ SLO_QUEUE_DEPTH_WARN = int(os.getenv("SLO_QUEUE_DEPTH_WARN", "50"))
 SLO_QUEUE_DEPTH_CRITICAL = int(os.getenv("SLO_QUEUE_DEPTH_CRITICAL", "100"))
 SLO_DLQ_DEPTH_WARN = int(os.getenv("SLO_DLQ_DEPTH_WARN", "5"))
 SLO_API_P95_MS_WARN = int(os.getenv("SLO_API_P95_MS_WARN", "200"))
+INTEGRATION_RATE_LIMIT_PER_MIN = int(os.getenv("INTEGRATION_RATE_LIMIT_PER_MIN", "120"))
+JWT_SECRET = os.getenv("JWT_SECRET", "sentinelmesh-dev-secret-change-me")
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_TTL_SECONDS = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "900"))
+REFRESH_TOKEN_TTL_SECONDS = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", str(7 * 24 * 3600)))
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+CSRF_COOKIE_NAME = "csrf_token"
+ACCESS_COOKIE_NAME = "access_token"
+REFRESH_COOKIE_NAME = "refresh_token"
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
+LOGIN_RATE_LIMIT_PER_MIN = int(os.getenv("LOGIN_RATE_LIMIT_PER_MIN", "20"))
+REGISTER_RATE_LIMIT_PER_MIN = int(os.getenv("REGISTER_RATE_LIMIT_PER_MIN", "10"))
+BOOTSTRAP_ADMIN_SECRET = os.getenv("BOOTSTRAP_ADMIN_SECRET", "")
+BOOTSTRAP_ADMIN_MAX_ATTEMPTS_PER_HOUR = int(os.getenv("BOOTSTRAP_ADMIN_MAX_ATTEMPTS_PER_HOUR", "3"))
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+GOOGLE_OAUTH_REDIRECT_URI = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8002/api/v1/auth/google/callback").strip()
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8002").rstrip("/")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3001").rstrip("/")
 test_starts_in_window: List[float] = []
+
+
+def _validate_auth_config() -> None:
+    redirect = GOOGLE_OAUTH_REDIRECT_URI
+    if "8003" in redirect:
+        raise RuntimeError("Invalid OAuth redirect port: 8003 is not supported. Use backend port 8002.")
+    if BACKEND_URL not in redirect:
+        raise RuntimeError(
+            f"OAuth redirect URI must include BACKEND_URL. BACKEND_URL={BACKEND_URL}, GOOGLE_OAUTH_REDIRECT_URI={redirect}"
+        )
+    if not FRONTEND_URL.startswith("http://localhost:3001"):
+        logger.warning("FRONTEND_URL is '%s'; expected localhost:3001 for local OAuth consistency", FRONTEND_URL)
 
 REQUEST_COUNT = Counter("sentinelmesh_http_requests_total", "Total HTTP requests", ["method", "path", "status"])
 REQUEST_LATENCY = Histogram("sentinelmesh_http_request_latency_seconds", "Request latency", ["method", "path"])
@@ -79,6 +115,180 @@ MEMORY_MB = Gauge("sentinelmesh_memory_mb", "Process memory usage MB")
 
 def _memory_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+
+def _decode_jwt_payload(token: str) -> Dict[str, Any]:
+    try:
+        payload_part = token.split(".")[1]
+        padding = "=" * (-len(payload_part) % 4)
+        decoded = base64.urlsafe_b64decode(payload_part + padding).decode("utf-8")
+        return json.loads(decoded)
+    except Exception:
+        return {}
+
+
+def _create_jwt_token(user_id: str, token_type: str, ttl_seconds: int) -> str:
+    now = int(time.time())
+    payload = {
+        "sub": user_id,
+        "type": token_type,
+        "iat": now,
+        "exp": now + ttl_seconds,
+        "jti": uuid.uuid4().hex,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+async def _create_auth_response(user: Dict[str, Any], request: Request) -> JSONResponse:
+    user_id = user["id"]
+    access_token = _create_jwt_token(user_id, "access", ACCESS_TOKEN_TTL_SECONDS)
+    refresh_token = _create_jwt_token(user_id, "refresh", REFRESH_TOKEN_TTL_SECONDS)
+    csrf_token = secrets.token_urlsafe(32)
+
+    if redis_client:
+        refresh_payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        await redis_client.setex(f"refresh:{refresh_payload['jti']}", REFRESH_TOKEN_TTL_SECONDS, user_id)
+
+    response = JSONResponse({"status": "ok", "role": user["role"], "csrf_token": csrf_token})
+    response.set_cookie(ACCESS_COOKIE_NAME, access_token, httponly=True, secure=COOKIE_SECURE, samesite="strict", max_age=ACCESS_TOKEN_TTL_SECONDS)
+    response.set_cookie(REFRESH_COOKIE_NAME, refresh_token, httponly=True, secure=COOKIE_SECURE, samesite="strict", max_age=REFRESH_TOKEN_TTL_SECONDS)
+    response.set_cookie(CSRF_COOKIE_NAME, csrf_token, httponly=False, secure=COOKIE_SECURE, samesite="strict", max_age=REFRESH_TOKEN_TTL_SECONDS)
+    return response
+
+
+def _extract_user_id_from_request(request: Request, required: bool = False) -> str:
+    cookie_token = request.cookies.get(ACCESS_COOKIE_NAME)
+    if cookie_token:
+        try:
+            payload = jwt.decode(cookie_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload.get("sub")
+            if user_id:
+                return str(user_id)
+        except Exception:
+            pass
+
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+        payload = _decode_jwt_payload(token)
+        user_id = payload.get("sub") or payload.get("user_id") or payload.get("email")
+        if user_id:
+            return str(user_id)
+    header_user = request.headers.get("x-user-id")
+    if header_user:
+        return header_user
+    if required:
+        raise HTTPException(status_code=401, detail="Missing or invalid user identity")
+    return "anonymous"
+
+
+def _csrf_tokens_match(request: Request) -> bool:
+    cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+    header_token = request.headers.get("x-csrf-token")
+    return bool(cookie_token and header_token and secrets.compare_digest(cookie_token, header_token))
+
+
+def _validate_email(email: str) -> bool:
+    return bool(email and "@" in email and "." in email.split("@")[-1])
+
+
+async def _rate_limit_auth(request: Request, key_prefix: str, max_attempts: int, window_seconds: int = 60):
+    if not redis_client:
+        return
+    ip = request.client.host if request.client else "unknown"
+    key = f"{key_prefix}:{ip}:{int(time.time() // window_seconds)}"
+    count = await redis_client.incr(key)
+    if count == 1:
+        await redis_client.expire(key, window_seconds + 10)
+    if count > max_attempts:
+        raise HTTPException(status_code=429, detail="Too many attempts, try later")
+
+
+async def _get_current_user(request: Request, required: bool = True) -> Dict[str, Any] | None:
+    user_id = _extract_user_id_from_request(request, required=required)
+    if not user_id:
+        return None
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT id, email, role, telegram_chat_id, is_verified, created_at FROM users WHERE id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+def require_role(role: str):
+    async def _enforce(request: Request):
+        user = await _get_current_user(request, required=True)
+        if not user or user.get("role") != role:
+            raise HTTPException(status_code=403, detail="Insufficient role")
+        return user
+    return _enforce
+
+
+async def _log_audit_event(action: str, actor: str, user_id: str, details: str):
+    db = await get_db()
+    try:
+        entry_id = f"aud_{uuid.uuid4().hex[:12]}"
+        signature = supervisor.gatekeeper.sign_message(details).hex()
+        await db.execute(
+            "INSERT INTO audit_trail (entry_id, timestamp, action, actor, user_id, details, signature) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (entry_id, time.time(), action, actor, user_id, details, signature),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+def _sanitize_text(value: Any, max_len: int = 500) -> str:
+    text = str(value or "").replace("\x00", "").strip()
+    return text[:max_len]
+
+
+def _normalize_integration_type(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized not in {"n8n", "api", "chrome", "mcp"}:
+        raise HTTPException(status_code=400, detail="Invalid integration type")
+    return normalized
+
+
+async def _get_alert_preferences(user_id: str) -> Dict[str, Any]:
+    db = await get_db()
+    try:
+        async with db.execute(
+            """
+            SELECT email_enabled, critical_only, login_alerts, automation_alerts
+            FROM user_alert_preferences
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return {
+                    "email_enabled": bool(row["email_enabled"]),
+                    "critical_only": bool(row["critical_only"]),
+                    "login_alerts": bool(row["login_alerts"]),
+                    "automation_alerts": bool(row["automation_alerts"]),
+                }
+            return {
+                "email_enabled": True,
+                "critical_only": False,
+                "login_alerts": True,
+                "automation_alerts": True,
+            }
+    finally:
+        await db.close()
+
+
+async def _publish_user_event(user_id: str, event_type: str, payload: Dict[str, Any]):
+    if not redis_client:
+        return
+    message = {"type": event_type, "ts": time.time(), "payload": payload}
+    await redis_client.publish(f"sentinelmesh:user:{user_id}:events", json.dumps(message))
 
 
 app = FastAPI(title="SentinelMesh API")
@@ -122,8 +332,26 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled error path=%s error=%s", request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
 @app.middleware("http")
 async def request_metrics_middleware(request: Request, call_next):
+    csrf_exempt_paths = {"/api/v1/auth/login", "/api/v1/auth/csrf", "/api/v1/auth/refresh"}
+    has_auth_cookie = bool(request.cookies.get(ACCESS_COOKIE_NAME))
+    if has_auth_cookie and request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in csrf_exempt_paths:
+        if not _csrf_tokens_match(request):
+            ERROR_COUNT.labels(type="csrf_failed").inc()
+            return JSONResponse(status_code=403, content={"detail": "CSRF validation failed"})
+
     req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
     request_id_ctx.set(req_id)
     request.state.request_id = req_id
@@ -149,8 +377,11 @@ async def request_metrics_middleware(request: Request, call_next):
     started = time.perf_counter()
     status_code = 500
     try:
-        response = await call_next(request)
+        response = await asyncio.wait_for(call_next(request), timeout=REQUEST_TIMEOUT_SECONDS)
         status_code = response.status_code
+    except asyncio.TimeoutError:
+        ERROR_COUNT.labels(type="request_timeout").inc()
+        return JSONResponse(status_code=504, content={"detail": "Request timed out"})
     except Exception:
         ERROR_COUNT.labels(type="unhandled_exception").inc()
         logger.exception("Unhandled request failure")
@@ -176,8 +407,643 @@ async def request_metrics_middleware(request: Request, call_next):
 async def root():
     return {"status": "ok", "service": "SentinelMesh API"}
 
+
+@app.post("/api/v1/auth/register")
+async def auth_register(request: Request, payload: Dict[str, str]):
+    await _rate_limit_auth(request, "auth:register", REGISTER_RATE_LIMIT_PER_MIN)
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    telegram_chat_id = (payload.get("telegram_chat_id") or "").strip()
+    if "role" in payload:
+        raise HTTPException(status_code=400, detail="Role cannot be set during public registration")
+    if not _validate_email(email):
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    db = await get_db()
+    try:
+        async with db.execute("SELECT id FROM users WHERE email = ?", (email,)) as cursor:
+            existing = await cursor.fetchone()
+            if existing:
+                raise HTTPException(status_code=409, detail="Email already exists")
+        user_id = uuid.uuid4().hex
+        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        admin_email = os.getenv("ADMIN_EMAIL", "ayushpatel7869595243@gmail.com").strip().lower()
+        role = "ADMIN" if email == admin_email else "USER"
+        await db.execute(
+            "INSERT INTO users (id, email, password_hash, role, telegram_chat_id, is_verified, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
+            (user_id, email, password_hash, role, telegram_chat_id, time.time()),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    notification_service.send_email(
+        subject="Welcome to SentinelMesh",
+        html_content=(
+            "<p>Hello,</p><p>Your account has been successfully created.</p>"
+            f"<p>Role: {role}</p><p>You will receive alerts and security notifications.</p>"
+            "<p>Regards,<br/>SentinelMesh</p>"
+        ),
+        to_email=email,
+    )
+    if telegram_chat_id:
+        notification_service.send_telegram(
+            f"✅ Account Created\n\nWelcome to SentinelMesh!\n\nRole: {role}\n\nYou will receive security alerts here.",
+            chat_id=telegram_chat_id,
+        )
+    await _log_audit_event("REGISTER", email, user_id, f"User registered with role {role} and telegram_chat_id={bool(telegram_chat_id)}")
+    return {"status": "registered", "user_id": user_id}
+
+
+@app.post("/api/v1/auth/bootstrap-admin")
+async def auth_bootstrap_admin(request: Request, payload: Dict[str, str]):
+    await _rate_limit_auth(request, "auth:bootstrap-admin", BOOTSTRAP_ADMIN_MAX_ATTEMPTS_PER_HOUR, window_seconds=3600)
+    if not BOOTSTRAP_ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="Bootstrap secret not configured")
+    if payload.get("bootstrap_secret") != BOOTSTRAP_ADMIN_SECRET:
+        await _log_audit_event("BOOTSTRAP_ADMIN_FAIL", "bootstrap", "system", "Invalid bootstrap secret")
+        raise HTTPException(status_code=401, detail="Invalid secret")
+
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    telegram_chat_id = (payload.get("telegram_chat_id") or "").strip()
+    if not _validate_email(email):
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    db = await get_db()
+    try:
+        async with db.execute("SELECT COUNT(*) AS c FROM users WHERE role = 'ADMIN'") as cursor:
+            admin_count = (await cursor.fetchone())["c"]
+            if admin_count > 0:
+                await _log_audit_event("BOOTSTRAP_ADMIN_FAIL", "bootstrap", "system", "Admin already exists")
+                raise HTTPException(status_code=403, detail="Admin already exists")
+        async with db.execute("SELECT id FROM users WHERE email = ?", (email,)) as cursor:
+            if await cursor.fetchone():
+                raise HTTPException(status_code=409, detail="Email already exists")
+
+        user_id = uuid.uuid4().hex
+        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        await db.execute(
+            "INSERT INTO users (id, email, password_hash, role, telegram_chat_id, is_verified, created_at) VALUES (?, ?, ?, 'ADMIN', ?, 1, ?)",
+            (user_id, email, password_hash, telegram_chat_id, time.time()),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    notification_service.send_email(
+        subject="Welcome to SentinelMesh",
+        html_content=(
+            "<p>Hello,</p><p>Your account has been successfully created.</p>"
+            "<p>Role: ADMIN</p><p>You will receive alerts and security notifications.</p>"
+            "<p>Regards,<br/>SentinelMesh</p>"
+        ),
+        to_email=email,
+    )
+    if telegram_chat_id:
+        notification_service.send_telegram(
+            "✅ Account Created\n\nWelcome to SentinelMesh!\n\nRole: ADMIN\n\nYou will receive security alerts here.",
+            chat_id=telegram_chat_id,
+        )
+    await _log_audit_event("BOOTSTRAP_ADMIN_SUCCESS", email, user_id, "Initial admin bootstrap completed")
+    return {"status": "bootstrap_complete", "user_id": user_id}
+
+
+@app.post("/api/v1/auth/login")
+async def auth_login(request: Request, payload: Dict[str, str]):
+    await _rate_limit_auth(request, "auth:login", LOGIN_RATE_LIMIT_PER_MIN)
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password required")
+
+    db = await get_db()
+    user = None
+    try:
+        async with db.execute(
+            "SELECT id, email, password_hash, role, telegram_chat_id, auth_provider FROM users WHERE email = ?",
+            (email,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                await _log_audit_event("LOGIN_FAIL", email or "unknown", "anonymous", "Unknown email")
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+            
+            user = dict(row)
+            if user.get("auth_provider") == "google":
+                raise HTTPException(status_code=400, detail="Use Google login")
+            
+            if not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+                await _log_audit_event("LOGIN_FAIL", email, user["id"], "Invalid password")
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+    finally:
+        await db.close()
+
+    user_id = user["id"]
+    prefs = await _get_alert_preferences(user_id)
+
+    login_time = datetime.datetime.utcnow().isoformat() + "Z"
+    login_ip = request.client.host if request.client else "unknown"
+    if prefs["email_enabled"] and prefs["login_alerts"]:
+        notification_service.send_email(
+            subject="New Login Detected",
+            html_content=(
+                "<p>Hello,</p>"
+                "<p>A login was detected on your account.</p>"
+                f"<p>Time: {login_time}<br/>IP: {login_ip}</p>"
+                "<p>If this wasn't you, take action immediately.</p><p>SentinelMesh</p>"
+            ),
+            to_email=user["email"],
+        )
+    if user.get("telegram_chat_id"):
+        notification_service.send_telegram(
+            f"🔐 Login Detected\n\nTime: {login_time}\nIP: {login_ip}\n\nIf this wasn’t you, secure your account.",
+            chat_id=user["telegram_chat_id"],
+        )
+    await _log_audit_event("LOGIN_SUCCESS", user["email"], user_id, f"Successful login from ip={login_ip}")
+    await _publish_user_event(user_id, "login", {"provider": "password", "ip": login_ip})
+
+    return await _create_auth_response(user, request)
+
+
+@app.get("/api/v1/auth/google/start")
+async def auth_google_start(next_path: str = "/dashboard/user"):
+    if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
+        raise HTTPException(status_code=503, detail="Google OAuth not configured")
+    state = secrets.token_urlsafe(32)
+    query = urllib.parse.urlencode(
+        {
+            "client_id": GOOGLE_OAUTH_CLIENT_ID,
+            "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "access_type": "offline",
+            "prompt": "consent",
+        }
+    )
+    response = RedirectResponse(url=f"https://accounts.google.com/o/oauth2/v2/auth?{query}")
+    response.set_cookie("google_oauth_state", state, httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=600)
+    response.set_cookie("google_oauth_next", next_path if next_path.startswith("/") else "/dashboard/user", httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=600)
+    return response
+
+
+@app.get("/api/v1/auth/google/callback")
+async def auth_google_callback(request: Request, code: str = "", state: str = ""):
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing Google authorization code")
+    cookie_state = request.cookies.get("google_oauth_state", "")
+    next_path = request.cookies.get("google_oauth_next", "/dashboard/user")
+    if not cookie_state or not state or not secrets.compare_digest(cookie_state, state):
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+    if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
+        raise HTTPException(status_code=503, detail="Google OAuth not configured")
+
+    token_req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=urllib.parse.urlencode(
+            {
+                "code": code,
+                "client_id": GOOGLE_OAUTH_CLIENT_ID,
+                "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(token_req, timeout=10) as resp:
+            token_data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Google token exchange failed") from exc
+
+    id_token = token_data.get("id_token")
+    if not id_token:
+        raise HTTPException(status_code=401, detail="Google did not return id_token")
+
+    try:
+        tokeninfo_url = f"https://oauth2.googleapis.com/tokeninfo?id_token={urllib.parse.quote(id_token)}"
+        with urllib.request.urlopen(tokeninfo_url, timeout=10) as resp:
+            profile = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Google token validation failed") from exc
+
+    if profile.get("aud") != GOOGLE_OAUTH_CLIENT_ID:
+        raise HTTPException(status_code=401, detail="Google token audience mismatch")
+    
+    email_verified = profile.get("email_verified")
+    if str(email_verified).lower() != "true":
+        raise HTTPException(status_code=401, detail="Google email not verified")
+        
+    sub = profile.get("sub")
+    if not sub:
+        raise HTTPException(status_code=400, detail="Google profile missing sub")
+
+    email = (profile.get("email") or "").strip().lower()
+    if not _validate_email(email):
+        raise HTTPException(status_code=400, detail="Google account email missing")
+
+    admin_email = os.getenv("ADMIN_EMAIL", "ayushpatel7869595243@gmail.com").strip().lower()
+
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT id, email, role, telegram_chat_id, auth_provider, google_id FROM users WHERE email = ?",
+            (email,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            user = dict(row)
+            if user.get("auth_provider") == "local":
+                # Link local account to Google
+                await db.execute(
+                    "UPDATE users SET auth_provider = 'google+local', google_id = ? WHERE id = ?",
+                    (sub, user["id"]),
+                )
+                await db.commit()
+                user["auth_provider"] = "google+local"
+                user["google_id"] = sub
+                await _log_audit_event("ACCOUNT_LINKED", email, user["id"], "Google account linked to local account")
+            else:
+                # Already linked or Google-only. Verify 'sub' matches.
+                if user.get("google_id") != sub:
+                    await _log_audit_event("ACCOUNT_TAKEOVER_ATTEMPT", email, user["id"], "Mismatched Google sub")
+                    raise HTTPException(status_code=400, detail="Account conflict: Google ID mismatch")
+        else:
+            user_id = uuid.uuid4().hex
+            role = "ADMIN" if email == admin_email else "USER"
+            await db.execute(
+                "INSERT INTO users (id, email, password_hash, role, telegram_chat_id, is_verified, created_at, auth_provider, google_id) VALUES (?, ?, ?, ?, '', 1, ?, 'google', ?)",
+                (user_id, email, "GOOGLE_OAUTH", role, time.time(), sub),
+            )
+            await db.commit()
+            user = {"id": user_id, "email": email, "role": role, "telegram_chat_id": "", "auth_provider": "google", "google_id": sub}
+            await _log_audit_event("REGISTER_GOOGLE", email, user_id, f"User registered via Google OAuth with role {role}")
+    finally:
+        await db.close()
+
+    login_time = datetime.datetime.utcnow().isoformat() + "Z"
+    login_ip = request.client.host if request.client else "unknown"
+    prefs = await _get_alert_preferences(user["id"])
+
+    if prefs["email_enabled"] and prefs["login_alerts"]:
+        notification_service.send_email(
+            subject="New Login Detected (Google OAuth)",
+            html_content=(
+                "<p>Hello,</p>"
+                "<p>A login via Google OAuth was detected on your account.</p>"
+                f"<p>Time: {login_time}<br/>IP: {login_ip}</p>"
+                "<p>If this wasn't you, take action immediately.</p><p>SentinelMesh</p>"
+            ),
+            to_email=user["email"],
+        )
+    if user.get("telegram_chat_id"):
+        notification_service.send_telegram(
+            f"🔐 Login Detected (Google)\n\nTime: {login_time}\nIP: {login_ip}\n\nIf this wasn’t you, secure your account.",
+            chat_id=user["telegram_chat_id"],
+        )
+
+    await _log_audit_event("LOGIN_GOOGLE", email, user["id"], f"Successful Google login from ip={login_ip}")
+    await _publish_user_event(user["id"], "login", {"provider": "google", "ip": login_ip})
+
+    auth_response = await _create_auth_response(user, request)
+    redirect_path = "/dashboard/user"
+    if user.get("role") == "ADMIN":
+        redirect_path = "/"
+    elif next_path.startswith("/"):
+        redirect_path = next_path
+    auth_response.status_code = 302
+    auth_response.headers["Location"] = f"{FRONTEND_URL}{redirect_path}"
+
+    # Re-set auth cookies with samesite=lax so they survive the cross-site
+    # redirect from accounts.google.com back to the frontend (strict cookies
+    # are blocked by browsers on cross-site top-level navigations).
+    # Rebuild the three auth cookies with lax policy
+    for cookie_name, cookie_attr in [
+        (ACCESS_COOKIE_NAME, {"max_age": ACCESS_TOKEN_TTL_SECONDS, "httponly": True}),
+        (REFRESH_COOKIE_NAME, {"max_age": REFRESH_TOKEN_TTL_SECONDS, "httponly": True}),
+        (CSRF_COOKIE_NAME, {"max_age": REFRESH_TOKEN_TTL_SECONDS, "httponly": False}),
+    ]:
+        # Extract the value from the already-set cookie in the response
+        cookie_val = None
+        for header_name, header_value in auth_response.raw_headers:
+            if header_name == b"set-cookie" and header_value.startswith(f"{cookie_name}=".encode()):
+                cookie_val = header_value.split(b"=", 1)[1].split(b";")[0].decode()
+                break
+        if cookie_val:
+            auth_response.set_cookie(
+                cookie_name,
+                cookie_val,
+                httponly=cookie_attr["httponly"],
+                secure=COOKIE_SECURE,
+                samesite="lax",
+                max_age=cookie_attr["max_age"],
+            )
+
+    auth_response.delete_cookie("google_oauth_state")
+    auth_response.delete_cookie("google_oauth_next")
+    return auth_response
+
+
+@app.post("/api/v1/auth/refresh")
+async def auth_refresh(request: Request):
+    refresh_token = request.cookies.get(REFRESH_COOKIE_NAME)
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+    try:
+        payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        if redis_client:
+            token_key = f"refresh:{payload.get('jti')}"
+            active = await redis_client.get(token_key)
+            if not active:
+                raise HTTPException(status_code=401, detail="Refresh token expired")
+        user_id = payload.get("sub")
+        access_token = _create_jwt_token(user_id, "access", ACCESS_TOKEN_TTL_SECONDS)
+        response = JSONResponse({"status": "ok", "expires_in": ACCESS_TOKEN_TTL_SECONDS})
+        response.set_cookie(ACCESS_COOKIE_NAME, access_token, httponly=True, secure=COOKIE_SECURE, samesite="strict", max_age=ACCESS_TOKEN_TTL_SECONDS)
+        return response
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+
+@app.post("/api/v1/auth/logout")
+async def auth_logout(request: Request):
+    refresh_token = request.cookies.get(REFRESH_COOKIE_NAME)
+    if refresh_token and redis_client:
+        try:
+            payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            await redis_client.delete(f"refresh:{payload.get('jti')}")
+        except Exception:
+            pass
+    response = JSONResponse({"status": "logged_out"})
+    response.delete_cookie(ACCESS_COOKIE_NAME)
+    response.delete_cookie(REFRESH_COOKIE_NAME)
+    response.delete_cookie(CSRF_COOKIE_NAME)
+    return response
+
+
+@app.get("/api/v1/auth/csrf")
+async def auth_csrf():
+    csrf_token = secrets.token_urlsafe(32)
+    response = JSONResponse({"csrf_token": csrf_token})
+    response.set_cookie(CSRF_COOKIE_NAME, csrf_token, httponly=False, secure=COOKIE_SECURE, samesite="strict", max_age=REFRESH_TOKEN_TTL_SECONDS)
+    return response
+
+
+@app.get("/api/v1/auth/me")
+async def auth_me(request: Request):
+    user = await _get_current_user(request, required=True)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return user
+
+
+@app.post("/api/v1/auth/link-telegram")
+async def auth_link_telegram(request: Request, payload: Dict[str, str]):
+    user = await _get_current_user(request, required=True)
+    chat_id = (payload.get("telegram_chat_id") or "").strip()
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="telegram_chat_id is required")
+    db = await get_db()
+    try:
+        await db.execute("UPDATE users SET telegram_chat_id = ? WHERE id = ?", (chat_id, user["id"]))
+        await db.commit()
+    finally:
+        await db.close()
+    return {"status": "linked"}
+
+
+@app.post("/api/v1/user/integrations")
+async def create_user_integration(request: Request, payload: Dict[str, Any]):
+    user = await _get_current_user(request, required=True)
+    name = _sanitize_text(payload.get("name"), max_len=120)
+    endpoint = _sanitize_text(payload.get("endpoint"), max_len=500)
+    integration_type = _normalize_integration_type(_sanitize_text(payload.get("type"), max_len=30))
+    enabled = bool(payload.get("enabled", True))
+    if not name:
+        raise HTTPException(status_code=400, detail="Integration name is required")
+    if not endpoint.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Integration endpoint must be a valid http(s) URL")
+
+    integration_id = uuid.uuid4().hex
+    created_at = time.time()
+    db = await get_db()
+    try:
+        await db.execute(
+            """
+            INSERT INTO user_integrations (id, user_id, name, type, endpoint, enabled, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (integration_id, user["id"], name, integration_type, endpoint, 1 if enabled else 0, created_at),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    payload_out = {
+        "id": integration_id,
+        "user_id": user["id"],
+        "name": name,
+        "type": integration_type,
+        "endpoint": endpoint,
+        "enabled": enabled,
+        "created_at": created_at,
+    }
+    await _publish_user_event(user["id"], "integration_created", payload_out)
+    return payload_out
+
+
+@app.get("/api/v1/user/integrations")
+async def get_user_integrations(request: Request):
+    user = await _get_current_user(request, required=True)
+    db = await get_db()
+    try:
+        async with db.execute(
+            """
+            SELECT id, user_id, name, type, endpoint, enabled, created_at
+            FROM user_integrations
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (user["id"],),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return {
+                "integrations": [
+                    {
+                        "id": row["id"],
+                        "user_id": row["user_id"],
+                        "name": row["name"],
+                        "type": row["type"],
+                        "endpoint": row["endpoint"],
+                        "enabled": bool(row["enabled"]),
+                        "created_at": row["created_at"],
+                    }
+                    for row in rows
+                ]
+            }
+    finally:
+        await db.close()
+
+
+@app.delete("/api/v1/user/integrations/{integration_id}")
+async def delete_user_integration(integration_id: str, request: Request):
+    user = await _get_current_user(request, required=True)
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT id FROM user_integrations WHERE id = ? AND user_id = ?",
+            (integration_id, user["id"]),
+        ) as cursor:
+            if not await cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Integration not found")
+        await db.execute("DELETE FROM user_integrations WHERE id = ? AND user_id = ?", (integration_id, user["id"]))
+        await db.commit()
+    finally:
+        await db.close()
+    await _publish_user_event(user["id"], "integration_deleted", {"integration_id": integration_id})
+    return {"status": "deleted"}
+
+
+@app.get("/api/v1/user/alert-preferences")
+async def get_user_alert_preferences(request: Request):
+    user = await _get_current_user(request, required=True)
+    prefs = await _get_alert_preferences(user["id"])
+    return {"user_id": user["id"], **prefs}
+
+
+@app.post("/api/v1/user/alert-preferences")
+async def set_user_alert_preferences(request: Request, payload: Dict[str, Any]):
+    user = await _get_current_user(request, required=True)
+    email_enabled = bool(payload.get("email_enabled", True))
+    critical_only = bool(payload.get("critical_only", False))
+    login_alerts = bool(payload.get("login_alerts", True))
+    automation_alerts = bool(payload.get("automation_alerts", True))
+    updated_at = time.time()
+    db = await get_db()
+    try:
+        await db.execute(
+            """
+            INSERT INTO user_alert_preferences (user_id, email_enabled, critical_only, login_alerts, automation_alerts, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                email_enabled = excluded.email_enabled,
+                critical_only = excluded.critical_only,
+                login_alerts = excluded.login_alerts,
+                automation_alerts = excluded.automation_alerts,
+                updated_at = excluded.updated_at
+            """,
+            (user["id"], 1 if email_enabled else 0, 1 if critical_only else 0, 1 if login_alerts else 0, 1 if automation_alerts else 0, updated_at),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    prefs = {
+        "user_id": user["id"],
+        "email_enabled": email_enabled,
+        "critical_only": critical_only,
+        "login_alerts": login_alerts,
+        "automation_alerts": automation_alerts,
+    }
+    await _publish_user_event(user["id"], "alert_preferences_updated", prefs)
+    return prefs
+
+
+@app.post("/api/v1/ai/analyze")
+async def ai_analyze(request: Request, payload: Dict[str, Any]):
+    user = await _get_current_user(request, required=True)
+    query = _sanitize_text(payload.get("query"), max_len=2000)
+    context = payload.get("context", {})
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    query_lower = query.lower()
+    risk_score = 20
+    if any(word in query_lower for word in ["token", "admin", "oauth", "scope", "secret", "key"]):
+        risk_score += 30
+    if any(word in query_lower for word in ["*", "full access", "delete", "bypass"]):
+        risk_score += 30
+    risk_score = min(100, risk_score)
+    recommendation = "Proceed with caution and keep least-privilege scopes."
+    if risk_score >= 70:
+        recommendation = "Reduce permissions and require explicit approval before execution."
+    elif risk_score >= 40:
+        recommendation = "Review scopes and destination endpoint before running."
+    response_text = (
+        "Sentinel AI assessment: "
+        + ("high risk detected. " if risk_score >= 70 else "moderate/low risk. ")
+        + recommendation
+    )
+    result = {
+        "response": response_text,
+        "risk_score": risk_score,
+        "recommendation": recommendation,
+        "context_echo": context,
+    }
+    await _publish_user_event(user["id"], "ai_response", result)
+    return result
+
+
+@app.get("/api/v1/admin/users")
+async def admin_users(admin_user: Dict[str, Any] = Depends(require_role("ADMIN"))):
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT id, email, role, telegram_chat_id, is_verified, created_at FROM users ORDER BY created_at DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return {"users": [dict(r) for r in rows]}
+    finally:
+        await db.close()
+
+
+@app.post("/api/v1/admin/users/{user_id}/role")
+async def admin_update_user_role(
+    user_id: str,
+    payload: Dict[str, str],
+    admin_user: Dict[str, Any] = Depends(require_role("ADMIN")),
+):
+    new_role = (payload.get("role") or "").upper()
+    if new_role not in {"ADMIN", "USER"}:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    if admin_user["id"] == user_id and new_role != "ADMIN":
+        raise HTTPException(status_code=400, detail="Cannot downgrade your own admin role")
+    db = await get_db()
+    try:
+        async with db.execute("SELECT id FROM users WHERE id = ?", (user_id,)) as cursor:
+            if not await cursor.fetchone():
+                raise HTTPException(status_code=404, detail="User not found")
+        await db.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, user_id))
+        await db.commit()
+    finally:
+        await db.close()
+    await _log_audit_event(
+        "ROLE_CHANGE",
+        admin_user["id"],
+        user_id,
+        json.dumps(
+            {
+                "action": "ROLE_CHANGE",
+                "performed_by": admin_user["id"],
+                "target_user": user_id,
+                "new_role": new_role,
+            }
+        ),
+    )
+    return {"status": "updated", "role": new_role}
+
 @app.post("/api/v1/events")
-async def ingest_event(event_data: Dict[str, Any]):
+async def ingest_event(request: Request, event_data: Dict[str, Any]):
     if not redis_client:
         raise HTTPException(status_code=503, detail="Queue backend unavailable")
 
@@ -186,8 +1052,112 @@ async def ingest_event(event_data: Dict[str, Any]):
         ERROR_COUNT.labels(type="queue_backpressure").inc()
         raise HTTPException(status_code=503, detail="System under load, try again")
 
+    auth_user_id = _extract_user_id_from_request(request, required=False)
+    payload_user_id = _sanitize_text(event_data.get("user_id"), max_len=120)
+    metadata_user_id = _sanitize_text((event_data.get("metadata") or {}).get("user_id"), max_len=120)
+    user_id = auth_user_id if auth_user_id != "anonymous" else (payload_user_id or metadata_user_id or "anonymous")
+
+    integration_id = _sanitize_text(event_data.get("integration_id"), max_len=120)
+    integration = None
+    if integration_id:
+        if user_id == "anonymous":
+            raise HTTPException(status_code=401, detail="Authenticated user required for integration events")
+        db = await get_db()
+        try:
+            async with db.execute(
+                """
+                SELECT id, user_id, name, type, endpoint, enabled
+                FROM user_integrations
+                WHERE id = ? AND user_id = ?
+                """,
+                (integration_id, user_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    raise HTTPException(status_code=403, detail="Integration does not belong to current user")
+                integration = dict(row)
+                if not integration["enabled"]:
+                    raise HTTPException(status_code=403, detail="Integration is disabled")
+        finally:
+            await db.close()
+        rate_key = f"ratelimit:integration:{integration_id}:{int(time.time() // 60)}"
+        count = await redis_client.incr(rate_key)
+        if count == 1:
+            await redis_client.expire(rate_key, 70)
+        if count > INTEGRATION_RATE_LIMIT_PER_MIN:
+            raise HTTPException(status_code=429, detail="Integration rate limit exceeded")
+
+    event_action = _sanitize_text(event_data.get("action") or event_data.get("event_type") or "automation_event", max_len=120)
+    source_type = _sanitize_text(event_data.get("source") or ((integration or {}).get("type")) or "api", max_len=60)
+    source_name = _sanitize_text(event_data.get("source_name") or ((integration or {}).get("name")) or source_type, max_len=120)
+    raw_metadata = event_data.get("metadata")
+    if not isinstance(raw_metadata, dict):
+        raw_metadata = {}
+    sanitized_metadata = {
+        _sanitize_text(k, max_len=80): _sanitize_text(v, max_len=2000)
+        for k, v in list(raw_metadata.items())[:40]
+    }
+    risk_terms = {"admin", "token", "secret", "delete", "oauth", "scope", "credential", "privilege"}
+    combined_text = " ".join([event_action, json.dumps(sanitized_metadata)]).lower()
+    risk_score = 85 if any(term in combined_text for term in risk_terms) else 20
+    ai_decision = "BLOCK" if risk_score >= 70 else "ALLOW"
+    if ai_decision == "BLOCK":
+        ERROR_COUNT.labels(type="automation_blocked").inc()
+        if user_id != "anonymous":
+            prefs = await _get_alert_preferences(user_id)
+            if prefs["email_enabled"] and prefs["automation_alerts"]:
+                db = await get_db()
+                try:
+                    async with db.execute("SELECT email FROM users WHERE id = ?", (user_id,)) as cursor:
+                        row = await cursor.fetchone()
+                        if row:
+                            notification_service.send_email(
+                                subject="Automation blocked by SentinelMesh",
+                                html_content=(
+                                    "<p>Your automation execution was blocked.</p>"
+                                    f"<p>Integration: {(integration or {}).get('name', 'unknown')}</p>"
+                                    f"<p>Action: {event_action}</p>"
+                                    f"<p>Risk score: {risk_score}</p>"
+                                ),
+                                to_email=row["email"],
+                            )
+                finally:
+                    await db.close()
+            await _publish_user_event(
+                user_id,
+                "automation_blocked",
+                {"integration_id": integration_id, "action": event_action, "risk_score": risk_score, "decision": ai_decision},
+            )
+        raise HTTPException(status_code=403, detail="Automation blocked by SentinelMesh policy engine")
+
+    event_id = event_data.get("event_id") or f"evt_{uuid.uuid4().hex[:16]}"
+    timestamp = float(event_data.get("timestamp") or time.time())
+    db = await get_db()
+    try:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO events (event_id, timestamp, source, event_type, user_id, integration_id, ai_decision, metadata, raw_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (event_id, timestamp, source_name, event_action, user_id, integration_id or None, ai_decision, json.dumps(sanitized_metadata), json.dumps(event_data)),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    outbound_event = {
+        "event_id": event_id,
+        "timestamp": timestamp,
+        "source": source_name,
+        "event_type": event_action,
+        "user_id": user_id,
+        "metadata": {**sanitized_metadata, "risk_score": risk_score, "outcome": ai_decision},
+    }
     payload = {
-        "event": event_data,
+        "event": outbound_event,
+        "user_id": user_id,
+        "integration_id": integration_id,
+        "ai_decision": ai_decision,
         "retry_count": 0,
         "enqueued_at": time.time(),
         "request_id": request_id_ctx.get() or "",
@@ -196,7 +1166,19 @@ async def ingest_event(event_data: Dict[str, Any]):
     EVENTS_INGESTED.inc()
     QUEUE_DEPTH.set(queue_depth + 1)
     QUEUE_DEPTH_COMPAT.set(queue_depth + 1)
-    return {"status": "queued", "queue_depth": queue_depth + 1}
+    if user_id != "anonymous":
+        await _publish_user_event(
+            user_id,
+            "automation_status",
+            {
+                "integration_id": integration_id,
+                "action": event_action,
+                "decision": ai_decision,
+                "status": "queued",
+                "source": source_name,
+            },
+        )
+    return {"status": "queued", "queue_depth": queue_depth + 1, "decision": ai_decision, "event_id": event_id}
 
 @app.get("/api/v1/incidents")
 async def get_incidents():
@@ -215,7 +1197,8 @@ async def get_incidents():
     return result
 
 @app.post("/api/v1/approve/{incident_id}")
-async def approve_incident(incident_id: str, actor: str = "Admin"):
+async def approve_incident(incident_id: str, request: Request, actor: str = "Admin"):
+    user_id = _extract_user_id_from_request(request)
     db = await get_db()
     # 1. Update incident status
     await db.execute("UPDATE incidents SET status = 'approved' WHERE incident_id = ?", (incident_id,))
@@ -227,8 +1210,8 @@ async def approve_incident(incident_id: str, actor: str = "Admin"):
     # 3. Store in audit trail
     entry_id = f"aud_{int(time.time())}"
     await db.execute(
-        "INSERT INTO audit_trail (entry_id, timestamp, action, actor, details, signature) VALUES (?, ?, ?, ?, ?, ?)",
-        (entry_id, time.time(), "APPROVE", actor, action_text, signature)
+        "INSERT INTO audit_trail (entry_id, timestamp, action, actor, user_id, details, signature) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (entry_id, time.time(), "APPROVE", actor, user_id, action_text, signature)
     )
     
     await db.commit()
@@ -236,7 +1219,8 @@ async def approve_incident(incident_id: str, actor: str = "Admin"):
     return {"status": "approved", "signature": signature}
 
 @app.post("/api/v1/block/{incident_id}")
-async def block_incident(incident_id: str, actor: str = "Admin"):
+async def block_incident(incident_id: str, request: Request, actor: str = "Admin"):
+    user_id = _extract_user_id_from_request(request)
     db = await get_db()
     # 1. Update incident status
     await db.execute("UPDATE incidents SET status = 'blocked' WHERE incident_id = ?", (incident_id,))
@@ -248,8 +1232,8 @@ async def block_incident(incident_id: str, actor: str = "Admin"):
     # 3. Store in audit trail
     entry_id = f"aud_{int(time.time())}"
     await db.execute(
-        "INSERT INTO audit_trail (entry_id, timestamp, action, actor, details, signature) VALUES (?, ?, ?, ?, ?, ?)",
-        (entry_id, time.time(), "BLOCK", actor, action_text, signature)
+        "INSERT INTO audit_trail (entry_id, timestamp, action, actor, user_id, details, signature) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (entry_id, time.time(), "BLOCK", actor, user_id, action_text, signature)
     )
     
     await db.commit()
@@ -286,7 +1270,8 @@ async def update_config(config: Dict[str, str]):
 running_tests = {}
 
 @app.post("/api/v1/run-test/{test_type}")
-async def run_test(test_type: str, actor: str = "Admin"):
+async def run_test(test_type: str, request: Request, actor: str = "Admin"):
+    user_id = _extract_user_id_from_request(request)
     allowed_types = {
         "oauth": "attacker_sim/oauth_attack.py",
         "credential": "attacker_sim/cred_dump.py",
@@ -349,8 +1334,8 @@ async def run_test(test_type: str, actor: str = "Admin"):
     signature = supervisor.gatekeeper.sign_message(action_text).hex()
     entry_id = f"aud_{int(time.time())}"
     await db.execute(
-        "INSERT INTO audit_trail (entry_id, timestamp, action, actor, details, signature) VALUES (?, ?, ?, ?, ?, ?)",
-        (entry_id, time.time(), "RUN_TEST", actor, action_text, signature)
+        "INSERT INTO audit_trail (entry_id, timestamp, action, actor, user_id, details, signature) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (entry_id, time.time(), "RUN_TEST", actor, user_id, action_text, signature)
     )
     await db.commit()
     await db.close()
@@ -358,7 +1343,8 @@ async def run_test(test_type: str, actor: str = "Admin"):
     return {"status": "started", "test_type": test_type}
 
 @app.post("/api/v1/stop-tests")
-async def stop_tests(actor: str = "Admin"):
+async def stop_tests(request: Request, actor: str = "Admin"):
+    user_id = _extract_user_id_from_request(request)
     stopped = []
     for test_type, process in running_tests.items():
         if process.poll() is None:  # Still running
@@ -373,8 +1359,8 @@ async def stop_tests(actor: str = "Admin"):
         signature = supervisor.gatekeeper.sign_message(action_text).hex()
         entry_id = f"aud_{int(time.time())}"
         await db.execute(
-            "INSERT INTO audit_trail (entry_id, timestamp, action, actor, details, signature) VALUES (?, ?, ?, ?, ?, ?)",
-            (entry_id, time.time(), "STOP_TESTS", actor, action_text, signature)
+            "INSERT INTO audit_trail (entry_id, timestamp, action, actor, user_id, details, signature) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (entry_id, time.time(), "STOP_TESTS", actor, user_id, action_text, signature)
         )
         await db.commit()
         await db.close()
@@ -500,6 +1486,287 @@ async def system_alerts():
 
     return {"alerts": alerts}
 
+
+@app.get("/api/v1/user/timeline")
+async def user_timeline(request: Request, page: int = 1, limit: int = 20):
+    user_id = _extract_user_id_from_request(request, required=True)
+    db = await get_db()
+    timeline: List[Dict[str, Any]] = []
+    page = max(1, page)
+    limit = max(1, min(limit, 100))
+    offset = (page - 1) * limit
+    try:
+        async with db.execute(
+            """
+            SELECT e.event_id, e.timestamp, e.source, e.event_type, e.metadata, e.ai_decision, ui.name AS integration_name
+            FROM events e
+            LEFT JOIN user_integrations ui ON ui.id = e.integration_id
+            WHERE user_id = ?
+            ORDER BY e.timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
+        ) as cursor:
+            for row in await cursor.fetchall():
+                metadata = json.loads(row["metadata"] or "{}")
+                integration_name = row["integration_name"] or row["source"]
+                ai_decision = row["ai_decision"] or metadata.get("outcome", "ALLOW")
+                timeline.append(
+                    {
+                        "timestamp": row["timestamp"],
+                        "kind": "event",
+                        "action": f"You triggered {row['event_type']} via {integration_name}",
+                        "system_response": metadata.get(
+                            "system_response",
+                            f"AI decision: {ai_decision}. Event evaluated by SentinelMesh policy engine.",
+                        ),
+                        "final_outcome": ai_decision,
+                        "reference_id": row["event_id"],
+                    }
+                )
+
+        async with db.execute(
+            """
+            SELECT incident_id, created_at, summary, severity, status, outcome
+            FROM incidents
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
+        ) as cursor:
+            for row in await cursor.fetchall():
+                timeline.append(
+                    {
+                        "timestamp": row["created_at"],
+                        "kind": "incident",
+                        "action": row["summary"],
+                        "system_response": f"Risk scored as {str(row['severity']).upper()} by Supervisor/Gatekeeper",
+                        "final_outcome": row["outcome"] or ("BLOCK" if row["status"] == "blocked" else "QUEUE"),
+                        "reference_id": row["incident_id"],
+                    }
+                )
+
+        async with db.execute(
+            """
+            SELECT entry_id, timestamp, action, details
+            FROM audit_trail
+            WHERE user_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
+        ) as cursor:
+            for row in await cursor.fetchall():
+                timeline.append(
+                    {
+                        "timestamp": row["timestamp"],
+                        "kind": "audit",
+                        "action": row["action"],
+                        "system_response": row["details"],
+                        "final_outcome": "ALLOW" if row["action"] == "APPROVE" else "BLOCK",
+                        "reference_id": row["entry_id"],
+                    }
+                )
+
+        timeline.sort(key=lambda x: x["timestamp"] or 0, reverse=True)
+        total = len(timeline)
+        pages = max(1, (total + limit - 1) // limit)
+        return {"user_id": user_id, "items": timeline[:limit], "total": total, "page": page, "pages": pages}
+    finally:
+        await db.close()
+
+
+@app.get("/api/v1/user/alerts")
+async def user_alerts(request: Request, severity: str | None = None, page: int = 1, limit: int = 20):
+    user_id = _extract_user_id_from_request(request, required=True)
+    page = max(1, page)
+    limit = max(1, min(limit, 100))
+    offset = (page - 1) * limit
+    cache_key = f"user:{user_id}:alerts:{severity or 'all'}:{page}:{limit}"
+    if redis_client:
+        cached = await redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    db = await get_db()
+    try:
+        query = """
+            SELECT incident_id, created_at, summary, severity, status
+            FROM incidents
+            WHERE user_id = ?
+        """
+        params: List[Any] = [user_id]
+        if severity:
+            query += " AND LOWER(severity) = LOWER(?)"
+            params.append(severity)
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        alerts = []
+        async with db.execute(query, tuple(params)) as cursor:
+            for row in await cursor.fetchall():
+                sev = str(row["severity"]).lower()
+                alerts.append(
+                    {
+                        "id": row["incident_id"],
+                        "severity": sev,
+                        "severity_emoji": "🔴" if sev == "critical" else "🟠" if sev == "high" else "🟡",
+                        "status": "firing" if row["status"] in ("active", "blocked") else "resolved",
+                        "summary": row["summary"],
+                        "timestamp": row["created_at"],
+                    }
+                )
+        total_query = "SELECT COUNT(*) AS c FROM incidents WHERE user_id = ?"
+        total_params: List[Any] = [user_id]
+        if severity:
+            total_query += " AND LOWER(severity) = LOWER(?)"
+            total_params.append(severity)
+        async with db.execute(total_query, tuple(total_params)) as cursor:
+            total = (await cursor.fetchone())["c"]
+        payload = {"user_id": user_id, "alerts": alerts, "total": total, "page": page, "pages": max(1, (total + limit - 1) // limit)}
+        if redis_client:
+            await redis_client.setex(cache_key, 30, json.dumps(payload))
+        return payload
+    finally:
+        await db.close()
+
+
+@app.get("/api/v1/user/alerts/{incident_id}")
+async def user_alert_details(incident_id: str, request: Request):
+    user_id = _extract_user_id_from_request(request, required=True)
+    db = await get_db()
+    try:
+        async with db.execute(
+            """
+            SELECT incident_id, summary, severity, status, created_at, signals, timeline
+            FROM incidents
+            WHERE incident_id = ? AND user_id = ?
+            """,
+            (incident_id, user_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Alert not found")
+            signals = json.loads(row["signals"] or "[]")
+            reasons = [
+                {"reason": s.get("description", "Signal"), "risk_score": int(float(s.get("risk_score", 0)) * 100)}
+                for s in signals
+            ]
+            return {
+                "id": row["incident_id"],
+                "summary": row["summary"],
+                "severity": row["severity"],
+                "status": row["status"],
+                "timestamp": row["created_at"],
+                "risk_score": max([r["risk_score"] for r in reasons], default=0),
+                "reasons": reasons,
+                "evidence": signals,
+                "timeline": json.loads(row["timeline"] or "[]"),
+                "recommended_action": "Review source workflow and reduce granted scopes before retry.",
+            }
+    finally:
+        await db.close()
+
+
+@app.get("/api/v1/user/risk")
+async def user_risk(request: Request):
+    user_id = _extract_user_id_from_request(request, required=True)
+    cache_key = f"user:{user_id}:risk"
+    if redis_client:
+        cached = await redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    db = await get_db()
+    try:
+        async with db.execute(
+            """
+            SELECT severity, created_at
+            FROM incidents
+            WHERE user_id = ?
+              AND created_at >= ?
+            """,
+            (user_id, time.time() - 86400),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        weights = {"low": 5, "medium": 12, "high": 25, "critical": 40}
+        raw_score = sum(weights.get(str(r["severity"]).lower(), 0) for r in rows)
+        anomalies = len(rows)
+        score = min(100, raw_score)
+        payload = {
+            "user_id": user_id,
+            "score": score,
+            "factors": {
+                "alerts_24h": anomalies,
+                "recent_anomalies": anomalies,
+            },
+            "band": "high" if score >= 70 else "medium" if score >= 40 else "low",
+        }
+        if redis_client:
+            await redis_client.setex(cache_key, 60, json.dumps(payload))
+        return payload
+    finally:
+        await db.close()
+
+
+@app.get("/api/v1/user/automations")
+async def user_automations(request: Request, page: int = 1, limit: int = 20):
+    user_id = _extract_user_id_from_request(request, required=True)
+    page = max(1, page)
+    limit = max(1, min(limit, 100))
+    offset = (page - 1) * limit
+    db = await get_db()
+    try:
+        async with db.execute(
+            """
+            SELECT e.event_id, e.timestamp, e.source, e.event_type, e.metadata, e.ai_decision, e.integration_id, ui.name AS integration_name
+            FROM events e
+            LEFT JOIN user_integrations ui ON ui.id = e.integration_id
+            WHERE e.user_id = ?
+            ORDER BY e.timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        items = []
+        integrations = set()
+        for row in rows:
+            metadata = json.loads(row["metadata"] or "{}")
+            source = row["integration_name"] or row["source"] or "unknown"
+            integrations.add(source)
+            outcome = row["ai_decision"] or metadata.get("outcome", "ALLOW")
+            items.append(
+                {
+                    "id": row["event_id"],
+                    "name": row["event_type"],
+                    "source": source,
+                    "integration_id": row["integration_id"],
+                    "timestamp": row["timestamp"],
+                    "status": "blocked" if outcome == "BLOCK" else "pending" if outcome == "QUEUE" else "allowed",
+                    "ai_decision": outcome,
+                }
+            )
+
+        async with db.execute("SELECT COUNT(*) AS c FROM events WHERE user_id = ?", (user_id,)) as cursor:
+            total = (await cursor.fetchone())["c"]
+        return {
+            "user_id": user_id,
+            "automations": items,
+            "integrations": sorted(integrations),
+            "total": total,
+            "page": page,
+            "pages": max(1, (total + limit - 1) // limit),
+            "summary": {
+                "actions_today": len([i for i in items if i["timestamp"] >= time.time() - 86400]),
+                "blocked": len([i for i in items if i["status"] == "blocked"]),
+                "warnings": len([i for i in items if i["status"] == "pending"]),
+                "safe": len([i for i in items if i["status"] == "allowed"]),
+            },
+        }
+    finally:
+        await db.close()
+
 @app.websocket("/ws/alerts")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
@@ -508,6 +1775,41 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text() # Keep alive
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+
+@app.websocket("/ws/user/{user_id}")
+async def user_websocket_endpoint(websocket: WebSocket, user_id: str):
+    token = websocket.cookies.get(ACCESS_COOKIE_NAME)
+    if not token:
+        await websocket.close(code=4401)
+        return
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        token_user_id = str(payload.get("sub") or "")
+    except Exception:
+        await websocket.close(code=4401)
+        return
+    if token_user_id != user_id:
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    if not redis_client:
+        await websocket.close()
+        return
+    pubsub = redis_client.pubsub()
+    channel = f"sentinelmesh:user:{user_id}:events"
+    await pubsub.subscribe(channel)
+    try:
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message and message.get("type") == "message":
+                await websocket.send_text(message["data"])
+            await asyncio.sleep(0.05)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await pubsub.unsubscribe(channel)
+        await pubsub.aclose()
 
 
 async def _incident_relay():
@@ -616,6 +1918,7 @@ async def _alerts_loop():
 async def lifespan(app: FastAPI):
     global redis_client, relay_task, metrics_task, alerts_task
     started_at = time.perf_counter()
+    _validate_auth_config()
     await init_db()
     redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
     await redis_client.ping()

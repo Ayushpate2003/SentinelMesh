@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { Shield, Terminal, CheckCircle, XCircle, Search } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
-import { API_BASE_URL } from "@/lib/constants"
+import { apiFetch } from "@/lib/api"
 
 interface AuditEntry {
   entry_id: string
@@ -19,7 +19,7 @@ export default function AuditTrailPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/api/v1/audit-trail`)
+    apiFetch(`/api/v1/audit-trail`)
       .then(res => res.json())
       .then(data => {
         setEntries(data)

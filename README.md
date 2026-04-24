@@ -69,7 +69,28 @@ The API will be available at `http://localhost:8002`.
 cd dashboard
 npm run dev
 ```
-The dashboard will be available at `http://localhost:3000`.
+The dashboard will be available at `http://localhost:3001`.
+
+### OAuth Consistency (Required)
+
+Use a single backend origin for Google OAuth:
+
+- `BACKEND_URL=http://localhost:8002`
+- `FRONTEND_URL=http://localhost:3001`
+- `GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8002/api/v1/auth/google/callback`
+
+Google Cloud Console authorized redirect URI must match exactly:
+
+- `http://localhost:8002/api/v1/auth/google/callback`
+
+Before OAuth testing, clear browser cookies for `localhost` to remove stale `google_oauth_state` cookies.
+
+### Clean Restart
+
+```bash
+docker compose down -v
+docker compose --profile dev up --build
+```
 
 ### 3. Run Attack Simulators
 To test the detection engine, run any of the scripts in `attacker_sim/`:

@@ -10,6 +10,8 @@ python-dotenv
 resend
 requests
 prometheus-client
+PyJWT
+bcrypt
 mcp
 pytest
 pytest-asyncio

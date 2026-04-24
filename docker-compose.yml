@@ -37,7 +37,7 @@ services:
       - ./backend:/app/backend:cached
       - ./attacker_sim:/app/attacker_sim:cached
       - ./sentinelmesh.db:/app/sentinelmesh.db
-    profiles: ["dev", "dev-min"]
+    profiles: ["dev", "dev-min", "full"]
     mem_limit: 768m
     cpus: 1.00
     restart: unless-stopped
@@ -98,7 +98,7 @@ services:
       dockerfile: Dockerfile
     command: ["npm", "run", "dev"]
     ports:
-      - "3000:3000"
+      - "3001:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://backend:8002
       - CHOKIDAR_USEPOLLING=false
@@ -120,8 +120,6 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "2"]
-    ports:
-      - "8003:8002"
     env_file:
       - .env
     environment:
@@ -156,7 +154,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      backend-full:
+      backend:
         condition: service_healthy
     profiles: ["full"]
     mem_limit: 512m
@@ -192,10 +190,10 @@ services:
     ports:
       - "3002:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://backend-full:8002
+      - NEXT_PUBLIC_API_URL=http://backend:8002
       - NEXT_TELEMETRY_DISABLED=1
     depends_on:
-      backend-full:
+      backend:
         condition: service_healthy
     profiles: ["full"]
     mem_limit: 1024m
@@ -211,7 +209,7 @@ services:
     ports:
       - "9091:9090"
     depends_on:
-      backend-full:
+      backend:
         condition: service_healthy
       alertmanager:
         condition: service_started

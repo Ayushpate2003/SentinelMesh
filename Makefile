@@ -12,7 +12,7 @@ prod:
 	$(COMPOSE) --profile full up --build
 
 down:
-	$(COMPOSE) down
+	$(COMPOSE) down -v
 
 logs:
 	$(COMPOSE) logs -f --tail=200

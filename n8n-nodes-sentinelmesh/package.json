@@ -1,0 +1,43 @@
+{
+  "name": "n8n-nodes-sentinelmesh",
+  "version": "1.0.0",
+  "description": "n8n community node for SentinelMesh Security Gate",
+  "license": "MIT",
+  "author": "SentinelMesh",
+  "homepage": "https://github.com/sentinelmesh/sentinelmesh",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sentinelmesh/sentinelmesh.git"
+  },
+  "main": "dist/nodes/SentinelMesh.node.js",
+  "types": "dist/nodes/SentinelMesh.node.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "sentinelmesh",
+    "security",
+    "automation"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/nodes/SentinelMeshApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/SentinelMesh.node.js"
+    ]
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}

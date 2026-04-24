@@ -6,8 +6,11 @@ import { AlertCard } from "@/components/dashboard/AlertCard"
 import { Shield, Activity, Zap, Lock, List, Terminal, Settings, Play, Square, AlertTriangle } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { API_BASE_URL, WS_BASE_URL } from "@/lib/constants"
+import { useRequireAuth } from "@/hooks/useRequireAuth"
+import { apiFetch } from "@/lib/api"
 
 export default function DashboardPage() {
+  const { loading: authLoading, authorized } = useRequireAuth("ADMIN")
   const { incidents, addIncident, setIncidents } = useDashboardStore()
   const [status, setStatus] = useState("connecting")
   const [runningTest, setRunningTest] = useState<string | null>(null)
@@ -28,7 +31,7 @@ export default function DashboardPage() {
   const handleRunTest = async (type: string) => {
     try {
       setRunningTest(type)
-      const res = await fetch(`${API_BASE_URL}/api/v1/run-test/${type}`, { method: 'POST' })
+      const res = await apiFetch(`/api/v1/run-test/${type}`, { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
         showToast(`Started ${type} simulation`, 'success')
@@ -44,7 +47,7 @@ export default function DashboardPage() {
 
   const handleStopTests = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/v1/stop-tests`, { method: 'POST' })
+      const res = await apiFetch(`/api/v1/stop-tests`, { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
         showToast(`Stopped simulations: ${data.stopped_tests.join(', ') || 'None'}`, 'success')
@@ -58,8 +61,10 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
+    if (!authorized) return
+
     // Fetch initial incidents
-    fetch(`${API_BASE_URL}/api/v1/incidents`)
+    apiFetch(`/api/v1/incidents`)
       .then(res => res.json())
       .then(data => setIncidents(data))
       .catch(err => console.error("Failed to fetch incidents", err))
@@ -75,7 +80,7 @@ export default function DashboardPage() {
     ws.onclose = () => setStatus("disconnected")
 
     return () => ws.close()
-  }, [])
+  }, [authorized])
 
   const severityEmoji = (severity: string) => {
     if (severity === "critical") return "🔴"
@@ -92,8 +97,9 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
+    if (!authorized) return
     const fetchAlerts = () => {
-      fetch(`${API_BASE_URL}/api/v1/system/alerts`)
+      apiFetch(`/api/v1/system/alerts`)
         .then((res) => res.json())
         .then((data) => setActiveAlerts(Array.isArray(data.alerts) ? data.alerts : []))
         .catch(() => setActiveAlerts([]))
@@ -101,11 +107,12 @@ export default function DashboardPage() {
     fetchAlerts()
     const interval = setInterval(fetchAlerts, 10000)
     return () => clearInterval(interval)
-  }, [])
+  }, [authorized])
 
   useEffect(() => {
+    if (!authorized) return
     const fetchHealth = () => {
-      fetch(`${API_BASE_URL}/api/v1/system/health`)
+      apiFetch(`/api/v1/system/health`)
         .then((res) => res.json())
         .then((data) => {
           setSystemHealth({
@@ -120,7 +127,20 @@ export default function DashboardPage() {
     fetchHealth()
     const interval = setInterval(fetchHealth, 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [authorized])
+
+  if (authLoading || !authorized) {
+    return (
+      <div className="min-h-screen bg-background text-foreground p-8">
+        <div className="mb-6 h-8 w-64 animate-pulse rounded bg-muted" />
+        <div className="space-y-2 rounded-xl border border-border p-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="h-10 animate-pulse rounded bg-muted/60" />
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground p-8 font-sans relative">
@@ -143,6 +163,9 @@ export default function DashboardPage() {
         </div>
         <div className="flex items-center gap-8">
           <nav className="hidden md:flex items-center gap-6 text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+            <a href="/dashboard/user" className="hover:text-primary transition-colors flex items-center gap-2">
+              <Shield className="w-3 h-3" /> My Dashboard
+            </a>
             <a href="/incidents" className="hover:text-primary transition-colors flex items-center gap-2">
               <List className="w-3 h-3" /> Incidents
             </a>

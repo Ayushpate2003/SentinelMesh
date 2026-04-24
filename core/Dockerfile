@@ -12,4 +12,4 @@ COPY core/ ./core/
 COPY integrations/ ./integrations/
 COPY .env .
 
-CMD ["python", "core/supervisor.py"]
+CMD ["python", "-m", "core.supervisor"]

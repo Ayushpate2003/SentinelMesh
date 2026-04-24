@@ -38,6 +38,7 @@ stop_event = asyncio.Event()
 
 async def _process_event(supervisor: Supervisor, redis_client: Redis, payload: Dict[str, Any]):
     event_data = payload["event"]
+    user_id = payload.get("user_id") or event_data.get("metadata", {}).get("user_id") or "anonymous"
     retry_count = int(payload.get("retry_count", 0))
     event_id = event_data.get("event_id", "unknown")
     started = time.perf_counter()
@@ -56,31 +57,48 @@ async def _process_event(supervisor: Supervisor, redis_client: Redis, payload: D
         )
 
         await db.execute(
-            "INSERT INTO events (event_id, timestamp, source, event_type, metadata) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO events (event_id, timestamp, source, event_type, user_id, metadata) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 event_data["event_id"],
                 event_data["timestamp"],
                 event_data["source"],
                 event_data["event_type"],
+                user_id,
                 json.dumps(event_data.get("metadata", {})),
             ),
         )
 
         if incident:
             await db.execute(
-                "INSERT INTO incidents (incident_id, summary, severity, status, created_at, signals, affected_components, timeline) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO incidents (incident_id, summary, severity, status, created_at, user_id, outcome, signals, affected_components, timeline) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     incident.incident_id,
                     incident.summary,
                     incident.severity,
                     incident.status,
                     time.time(),
+                    user_id,
+                    "BLOCK" if incident.status == "blocked" else "QUEUE",
                     json.dumps([s.model_dump() for s in incident.signals]),
                     json.dumps(incident.affected_components),
                     json.dumps(incident.timeline),
                 ),
             )
             await redis_client.publish(INCIDENT_CHANNEL, json.dumps(incident.model_dump()))
+            await redis_client.publish(
+                f"sentinelmesh:user:{user_id}:events",
+                json.dumps(
+                    {
+                        "type": "incident",
+                        "user_id": user_id,
+                        "incident_id": incident.incident_id,
+                        "summary": incident.summary,
+                        "severity": incident.severity,
+                        "status": incident.status,
+                        "timestamp": time.time(),
+                    }
+                ),
+            )
 
         await db.commit()
         WORKER_PROCESSED_TOTAL.inc()

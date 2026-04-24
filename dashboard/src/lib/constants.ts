@@ -3,11 +3,17 @@ const defaultWsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8002"
 
 const runningInBrowser = typeof window !== "undefined"
 
-// If a browser build accidentally gets the Docker-internal hostname, fall back to localhost.
-export const API_BASE_URL = runningInBrowser
-  ? defaultApiUrl.replace("http://backend:8002", "http://localhost:8002")
-  : defaultApiUrl
+function normalizeBrowserApiUrl(url: string): string {
+  if (url.includes("backend:8002")) return "http://localhost:8002"
+  return url
+}
 
-export const WS_BASE_URL = runningInBrowser
-  ? defaultWsUrl.replace("ws://backend:8002", "ws://localhost:8002")
-  : defaultWsUrl
+function normalizeBrowserWsUrl(url: string): string {
+  if (url.includes("backend:8002")) return "ws://localhost:8002"
+  return url
+}
+
+// If a browser build gets Docker-internal hostnames, fall back to mapped localhost ports.
+export const API_BASE_URL = runningInBrowser ? normalizeBrowserApiUrl(defaultApiUrl) : defaultApiUrl
+
+export const WS_BASE_URL = runningInBrowser ? normalizeBrowserWsUrl(defaultWsUrl) : defaultWsUrl

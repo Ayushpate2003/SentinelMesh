@@ -14,15 +14,16 @@ class NotificationService:
         self.resend_api_key = os.getenv("RESEND_API_KEY")
         self.admin_email = os.getenv("ADMIN_EMAIL", "admin@example.com")
 
-    def send_telegram(self, message: str):
-        if not self.telegram_token or not self.telegram_chat_id or "your_" in self.telegram_token:
+    def send_telegram(self, message: str, chat_id: str = None):
+        target_chat_id = chat_id or self.telegram_chat_id
+        if not self.telegram_token or not target_chat_id or "your_" in self.telegram_token:
             logger.warning("Telegram notification skipped: configuration missing or placeholder found.")
             return False
         
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
         try:
             response = requests.post(url, json={
-                "chat_id": self.telegram_chat_id,
+                "chat_id": target_chat_id,
                 "text": message,
                 "parse_mode": "Markdown"
             })

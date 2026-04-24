@@ -120,3 +120,7 @@ if __name__ == "__main__":
     incident = supervisor.process_event(test_event)
     if incident:
         print(json.dumps(incident.model_dump(), indent=2))
+    
+    print("Test complete. Staying alive...")
+    while True:
+        time.sleep(3600)

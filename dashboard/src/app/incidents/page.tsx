@@ -5,7 +5,7 @@ import { Shield, Filter, ArrowUpDown, ChevronRight, AlertTriangle } from "lucide
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ForensicModal } from "@/components/ForensicModal"
-import { API_BASE_URL } from "@/lib/constants"
+import { apiFetch } from "@/lib/api"
 
 interface Signal {
   signal_id: string
@@ -39,7 +39,7 @@ export default function IncidentsPage() {
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null)
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/api/v1/incidents`)
+    apiFetch(`/api/v1/incidents`)
       .then(res => res.json())
       .then(data => {
         setIncidents(data)
@@ -53,7 +53,7 @@ export default function IncidentsPage() {
 
   const handleAction = async (id: string, action: 'approve' | 'block') => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/v1/${action}/${id}`, { method: 'POST' })
+      const res = await apiFetch(`/api/v1/${action}/${id}`, { method: 'POST' })
       if (res.ok) {
         // Refresh incidents
         const updated = incidents.map(inc => 

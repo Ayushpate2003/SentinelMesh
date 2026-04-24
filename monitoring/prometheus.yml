@@ -13,7 +13,7 @@ scrape_configs:
   - job_name: sentinelmesh-backend
     metrics_path: /metrics
     static_configs:
-      - targets: ["backend-full:8002"]
+      - targets: ["backend:8002"]
   - job_name: sentinelmesh-worker
     metrics_path: /metrics
     static_configs:
