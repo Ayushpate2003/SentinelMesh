@@ -429,6 +429,7 @@ async def metrics():
 
 @app.get("/api/v1/system/alerts")
 async def system_alerts():
+    alerts: List[Dict[str, Any]] = []
     try:
         with urllib.request.urlopen(f"{ALERTMANAGER_URL}/api/v2/alerts", timeout=2) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -442,6 +443,7 @@ async def system_alerts():
                     "ends_at": item.get("endsAt"),
                     "summary": item.get("annotations", {}).get("summary", ""),
                     "description": item.get("annotations", {}).get("description", ""),
+                    "source": "alertmanager",
                 }
                 for item in payload
             ]
@@ -456,10 +458,47 @@ async def system_alerts():
                     except Exception:
                         duration_seconds = 0
                 alert["duration_seconds"] = duration_seconds
-            return {"alerts": alerts}
     except Exception:
         ERROR_COUNT.labels(type="alertmanager_unavailable").inc()
-        return {"alerts": []}
+
+    # Fallback: surface recent high-severity incidents (Telegram notifications originate here).
+    if not alerts:
+        db = await get_db()
+        try:
+            one_hour_ago = time.time() - 3600
+            async with db.execute(
+                """
+                SELECT incident_id, summary, severity, status, created_at
+                FROM incidents
+                WHERE created_at >= ?
+                  AND LOWER(severity) IN ('high', 'critical')
+                ORDER BY created_at DESC
+                LIMIT 10
+                """,
+                (one_hour_ago,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                now = time.time()
+                for row in rows:
+                    created_at = row["created_at"] or now
+                    alerts.append(
+                        {
+                            "name": f"Incident:{row['incident_id']}",
+                            "severity": (row["severity"] or "high").lower(),
+                            "component": "supervisor",
+                            "status": row["status"] or "active",
+                            "starts_at": datetime.datetime.fromtimestamp(created_at, datetime.timezone.utc).isoformat(),
+                            "ends_at": None,
+                            "summary": row["summary"] or "Security incident",
+                            "description": "Recent high-severity incident from runtime pipeline.",
+                            "duration_seconds": max(0, int(now - created_at)),
+                            "source": "incident-fallback",
+                        }
+                    )
+        finally:
+            await db.close()
+
+    return {"alerts": alerts}
 
 @app.websocket("/ws/alerts")
 async def websocket_endpoint(websocket: WebSocket):

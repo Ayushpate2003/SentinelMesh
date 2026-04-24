@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 interface ThreatSignal {
-  signal_id: str
+  signal_id: string
   agent_name: string
   severity: string
   description: string

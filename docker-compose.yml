@@ -121,7 +121,7 @@ services:
       dockerfile: backend/Dockerfile
     command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "2"]
     ports:
-      - "8002:8002"
+      - "8003:8002"
     env_file:
       - .env
     environment:
@@ -190,7 +190,7 @@ services:
       dockerfile: Dockerfile
     command: ["sh", "-c", "npm run build && npm run start"]
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://backend-full:8002
       - NEXT_TELEMETRY_DISABLED=1
@@ -209,7 +209,7 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
     ports:
-      - "9090:9090"
+      - "9091:9090"
     depends_on:
       backend-full:
         condition: service_healthy
@@ -232,9 +232,10 @@ services:
   alertmanager-telegram:
     image: metalmatze/alertmanager-bot:latest
     command:
-      - "--store=memory"
+      - "--store=bolt"
       - "--telegram.token=${TELEGRAM_BOT_TOKEN}"
       - "--telegram.admin=${TELEGRAM_CHAT_ID}"
+      - "--alertmanager.url=http://alertmanager:9093"
       - "--log.level=info"
     env_file:
       - .env
