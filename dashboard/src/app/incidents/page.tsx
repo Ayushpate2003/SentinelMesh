@@ -76,7 +76,7 @@ export default function IncidentsPage() {
           </h1>
           <p className="text-muted-foreground mt-1 uppercase tracking-widest text-[10px]">Historical Security Data & Forensic Records</p>
         </div>
-        <a href="/" className="text-xs hover:text-primary transition-colors">← RETURN_TO_DASHBOARD</a>
+        <a href="/admin" className="text-xs hover:text-primary transition-colors">← RETURN_TO_DASHBOARD</a>
       </header>
 
       <div className="glass rounded-2xl overflow-hidden">

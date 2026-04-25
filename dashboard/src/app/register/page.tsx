@@ -2,11 +2,12 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
+import { SentinelMeshLogo } from "@/components/brand/SentinelMeshLogo"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { apiFetch } from "@/lib/api"
-import { API_BASE_URL } from "@/lib/constants"
+import { getApiBaseUrl } from "@/lib/constants"
 
 export default function RegisterPage() {
   const router = useRouter()
@@ -42,8 +43,11 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-6">
-      <form onSubmit={onSubmit} className="w-full max-w-md rounded-xl border border-border p-6 space-y-4">
+    <div className="flex min-h-screen items-center justify-center bg-background p-6 text-foreground">
+      <form onSubmit={onSubmit} className="w-full max-w-md space-y-4 rounded-xl border border-border p-6">
+        <div className="flex justify-center pb-2">
+          <SentinelMeshLogo heightPx={44} href="/" />
+        </div>
         <h1 className="text-2xl font-bold">Register</h1>
         <div className="space-y-2">
           <Label>Email</Label>
@@ -64,7 +68,7 @@ export default function RegisterPage() {
           variant="outline"
           className="w-full"
           onClick={() => {
-            window.location.href = `${API_BASE_URL}/api/v1/auth/google/start?next_path=/dashboard/user`
+            window.location.href = `${getApiBaseUrl()}/api/v1/auth/google/start?next_path=/dashboard/user`
           }}
         >
           Continue with Google

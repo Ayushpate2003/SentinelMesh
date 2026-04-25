@@ -248,6 +248,31 @@ def _sanitize_text(value: Any, max_len: int = 500) -> str:
     return text[:max_len]
 
 
+def _safe_json_loads(raw: Any, default: Any) -> Any:
+    """Parse JSON from SQLite/Redis text; never raise (avoids 500 on legacy or corrupt rows)."""
+    if raw is None:
+        return default
+    if isinstance(raw, (dict, list)):
+        return raw
+    text = str(raw).strip()
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        logger.warning("invalid_json_payload preview=%s", text[:200])
+        return default
+
+
+def _metrics_path_label(request: Request) -> str:
+    """Use route template for Prometheus labels to avoid dynamic path cardinality."""
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) if route is not None else None
+    if isinstance(path, str) and path.startswith("/"):
+        return path
+    return request.url.path or "/"
+
+
 def _normalize_integration_type(value: str) -> str:
     normalized = (value or "").strip().lower()
     if normalized not in {"n8n", "api", "chrome", "mcp"}:
@@ -339,7 +364,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
-    logger.error("Unhandled error path=%s error=%s", request.url.path, exc)
+    logger.exception("Unhandled error path=%s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
@@ -387,8 +412,9 @@ async def request_metrics_middleware(request: Request, call_next):
         logger.exception("Unhandled request failure")
         raise
     elapsed = time.perf_counter() - started
-    REQUEST_COUNT.labels(method=request.method, path=request.url.path, status=str(status_code)).inc()
-    REQUEST_LATENCY.labels(method=request.method, path=request.url.path).observe(elapsed)
+    path_label = _metrics_path_label(request)
+    REQUEST_COUNT.labels(method=request.method, path=path_label, status=str(status_code)).inc()
+    REQUEST_LATENCY.labels(method=request.method, path=path_label).observe(elapsed)
     recent_latencies_ms.append(elapsed * 1000)
     MEMORY_MB.set(_memory_mb())
     logger.info(
@@ -1188,10 +1214,13 @@ async def get_incidents():
         result = []
         for row in rows:
             d = dict(row)
-            # Parse JSON fields
-            if d.get("signals"): d["signals"] = json.loads(d["signals"])
-            if d.get("affected_components"): d["affected_components"] = json.loads(d["affected_components"])
-            if d.get("timeline"): d["timeline"] = json.loads(d["timeline"])
+            # Parse JSON fields (legacy rows may contain non-JSON text)
+            if d.get("signals") is not None and d.get("signals") != "":
+                d["signals"] = _safe_json_loads(d["signals"], [])
+            if d.get("affected_components") is not None and d.get("affected_components") != "":
+                d["affected_components"] = _safe_json_loads(d["affected_components"], [])
+            if d.get("timeline") is not None and d.get("timeline") != "":
+                d["timeline"] = _safe_json_loads(d["timeline"], [])
             result.append(d)
     await db.close()
     return result
@@ -1508,7 +1537,9 @@ async def user_timeline(request: Request, page: int = 1, limit: int = 20):
             (user_id, limit, offset),
         ) as cursor:
             for row in await cursor.fetchall():
-                metadata = json.loads(row["metadata"] or "{}")
+                metadata = _safe_json_loads(row["metadata"] or "{}", {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
                 integration_name = row["integration_name"] or row["source"]
                 ai_decision = row["ai_decision"] or metadata.get("outcome", "ALLOW")
                 timeline.append(
@@ -1587,7 +1618,10 @@ async def user_alerts(request: Request, severity: str | None = None, page: int =
     if redis_client:
         cached = await redis_client.get(cache_key)
         if cached:
-            return json.loads(cached)
+            try:
+                return json.loads(cached)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("user_alerts invalid redis cache key=%s", cache_key)
     db = await get_db()
     try:
         query = """
@@ -1647,11 +1681,25 @@ async def user_alert_details(incident_id: str, request: Request):
             row = await cursor.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Alert not found")
-            signals = json.loads(row["signals"] or "[]")
-            reasons = [
-                {"reason": s.get("description", "Signal"), "risk_score": int(float(s.get("risk_score", 0)) * 100)}
-                for s in signals
-            ]
+            signals = _safe_json_loads(row["signals"] or "[]", [])
+            if not isinstance(signals, list):
+                signals = []
+            reasons = []
+            for s in signals:
+                if not isinstance(s, dict):
+                    continue
+                try:
+                    reasons.append(
+                        {
+                            "reason": s.get("description", "Signal"),
+                            "risk_score": int(float(s.get("risk_score", 0)) * 100),
+                        }
+                    )
+                except (TypeError, ValueError):
+                    continue
+            timeline_parsed = _safe_json_loads(row["timeline"] or "[]", [])
+            if not isinstance(timeline_parsed, list):
+                timeline_parsed = []
             return {
                 "id": row["incident_id"],
                 "summary": row["summary"],
@@ -1661,7 +1709,7 @@ async def user_alert_details(incident_id: str, request: Request):
                 "risk_score": max([r["risk_score"] for r in reasons], default=0),
                 "reasons": reasons,
                 "evidence": signals,
-                "timeline": json.loads(row["timeline"] or "[]"),
+                "timeline": timeline_parsed,
                 "recommended_action": "Review source workflow and reduce granted scopes before retry.",
             }
     finally:
@@ -1675,7 +1723,10 @@ async def user_risk(request: Request):
     if redis_client:
         cached = await redis_client.get(cache_key)
         if cached:
-            return json.loads(cached)
+            try:
+                return json.loads(cached)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("user_risk invalid redis cache key=%s", cache_key)
     db = await get_db()
     try:
         async with db.execute(
@@ -1732,7 +1783,9 @@ async def user_automations(request: Request, page: int = 1, limit: int = 20):
         items = []
         integrations = set()
         for row in rows:
-            metadata = json.loads(row["metadata"] or "{}")
+            metadata = _safe_json_loads(row["metadata"] or "{}", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
             source = row["integration_name"] or row["source"] or "unknown"
             integrations.add(source)
             outcome = row["ai_decision"] or metadata.get("outcome", "ALLOW")

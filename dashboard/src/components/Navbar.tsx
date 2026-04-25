@@ -2,6 +2,7 @@
 
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
+import { SentinelMeshLogo } from "@/components/brand/SentinelMeshLogo"
 import { useAuth } from "@/context/AuthContext"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -11,7 +12,13 @@ export function Navbar() {
   const router = useRouter()
   const { user, loading, reconnecting, logout } = useAuth()
 
-  if (pathname === "/login" || pathname === "/register") {
+  if (
+    pathname === "/login" ||
+    pathname === "/register" ||
+    pathname === "/landing" ||
+    pathname === "/waitlist" ||
+    pathname === "/"
+  ) {
     return null
   }
 
@@ -22,7 +29,10 @@ export function Navbar() {
   return (
     <nav className="sticky top-0 z-40 flex items-center justify-between border-b border-border bg-background/95 px-4 py-2 backdrop-blur">
       <div className="flex items-center gap-4 text-sm">
-        <Link href="/dashboard" className="hover:text-primary">Dashboard</Link>
+        <SentinelMeshLogo heightPx={28} href="/" className="mr-1" />
+        <Link href="/admin" className="hover:text-primary">
+          Admin console
+        </Link>
         <Link href="/dashboard/user" className="hover:text-primary">User Dashboard</Link>
         {user?.role === "ADMIN" && <Link href="/admin/users" className="hover:text-primary">Admin</Link>}
       </div>

@@ -41,7 +41,7 @@ export default function AuditTrailPage() {
           </h1>
           <p className="text-muted-foreground mt-1 uppercase tracking-widest text-[10px]">Cryptographically Signed Immutable Ledger</p>
         </div>
-        <a href="/" className="text-xs hover:text-primary transition-colors">← RETURN_TO_DASHBOARD</a>
+        <a href="/admin" className="text-xs hover:text-primary transition-colors">← RETURN_TO_DASHBOARD</a>
       </header>
 
       <div className="glass rounded-2xl overflow-hidden border border-white/5">

@@ -74,7 +74,7 @@ export default function SettingsPage() {
           <p className="text-muted-foreground mt-1 uppercase tracking-widest text-[10px]">Adjust Global Risk Thresholds & Security Policies</p>
         </div>
         <div className="flex gap-4">
-          <a href="/" className="text-xs hover:text-primary transition-colors flex items-center">← DASHBOARD</a>
+          <a href="/admin" className="text-xs hover:text-primary transition-colors flex items-center">← DASHBOARD</a>
           <Button onClick={handleSave} disabled={saving} className="rounded-full px-6 flex items-center gap-2">
             <Save className="w-4 h-4" />
             {saving ? "Saving..." : "Save Changes"}

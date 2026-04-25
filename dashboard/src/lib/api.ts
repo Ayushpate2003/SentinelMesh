@@ -1,11 +1,27 @@
 "use client"
 
-import { API_BASE_URL } from "@/lib/constants"
+import { getApiBaseUrl } from "@/lib/constants"
 
 const CSRF_KEY = "sentinelmesh-csrf"
 const AUTH_REFRESHING_EVENT = "sentinelmesh:auth-refreshing"
 const AUTH_REFRESHED_EVENT = "sentinelmesh:auth-refreshed"
 const AUTH_FAILED_EVENT = "sentinelmesh:auth-failed"
+
+function normalizeBrowserPath(pathname: string) {
+  if (pathname.length > 1 && pathname.endsWith("/")) return pathname.slice(0, -1) || "/"
+  return pathname
+}
+
+/** Pages where a 401 (guest) must not trigger a hard navigation to /login. Keep in sync with `useRequireAuth`. */
+function isPublicGuestPath(pathname: string) {
+  const p = normalizeBrowserPath(pathname)
+  return p === "/login" || p === "/register" || p === "/" || p === "/landing" || p === "/waitlist"
+}
+
+/** Session checks — 401 here only means “not logged in”, never “expired session while inside the app”. */
+function isAuthSessionProbe(apiPath: string) {
+  return apiPath === "/api/v1/auth/me" || apiPath.startsWith("/api/v1/auth/me?")
+}
 
 export type ApiOptions = RequestInit & {
   includeCsrf?: boolean
@@ -14,7 +30,7 @@ export type ApiOptions = RequestInit & {
 
 function getFallbackBaseUrl(): string | null {
   try {
-    const parsed = new URL(API_BASE_URL)
+    const parsed = new URL(getApiBaseUrl())
     if (parsed.hostname === "localhost") {
       parsed.hostname = "127.0.0.1"
       return parsed.toString().replace(/\/$/, "")
@@ -27,7 +43,7 @@ function getFallbackBaseUrl(): string | null {
 
 async function fetchWithBaseFallback(path: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(`${API_BASE_URL}${path}`, init)
+    return await fetch(`${getApiBaseUrl()}${path}`, init)
   } catch {
     const fallbackBaseUrl = getFallbackBaseUrl()
     if (!fallbackBaseUrl) throw new TypeError("Failed to fetch")
@@ -114,7 +130,11 @@ export async function apiFetch(path: string, options: ApiOptions = {}) {
     if (refreshed) {
       return apiFetch(path, { ...options, _retry: true })
     }
-    if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+    if (
+      typeof window !== "undefined" &&
+      !isPublicGuestPath(window.location.pathname) &&
+      !isAuthSessionProbe(path)
+    ) {
       window.location.href = "/login"
     }
   }

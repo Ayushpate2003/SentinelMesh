@@ -2,11 +2,12 @@
 
 import { useState, useEffect, Suspense } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
+import { SentinelMeshLogo } from "@/components/brand/SentinelMeshLogo"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { apiFetch } from "@/lib/api"
-import { API_BASE_URL } from "@/lib/constants"
+import { getApiBaseUrl } from "@/lib/constants"
 
 const CSRF_KEY = "sentinelmesh-csrf"
 
@@ -41,7 +42,7 @@ function LoginContent() {
         return
       }
       if (data.csrf_token) localStorage.setItem(CSRF_KEY, data.csrf_token)
-      if (data.role === "ADMIN") router.push("/")
+      if (data.role === "ADMIN") router.push("/admin")
       else router.push("/dashboard/user")
     } finally {
       setLoading(false)
@@ -49,7 +50,10 @@ function LoginContent() {
   }
 
   return (
-    <form onSubmit={onSubmit} className="w-full max-w-md rounded-xl border border-border p-6 space-y-4">
+    <form onSubmit={onSubmit} className="w-full max-w-md space-y-4 rounded-xl border border-border p-6">
+      <div className="flex justify-center pb-2">
+        <SentinelMeshLogo heightPx={44} href="/" />
+      </div>
       <h1 className="text-2xl font-bold">Login</h1>
       <div className="space-y-2">
         <Label>Email</Label>
@@ -66,7 +70,7 @@ function LoginContent() {
         variant="outline"
         className="w-full"
         onClick={() => {
-          window.location.href = `${API_BASE_URL}/api/v1/auth/google/start?next_path=/dashboard/user`
+          window.location.href = `${getApiBaseUrl()}/api/v1/auth/google/start?next_path=/dashboard/user`
         }}
       >
         Continue with Google

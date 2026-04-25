@@ -150,3 +150,466 @@
   color: #00ff41; /* Classic Matrix Green */
   text-shadow: 0 0 5px #00ff41;
 }
+
+/* —— SentinelMesh marketing landing motion —— */
+:root {
+  --landing-cursor-x: 50vw;
+  --landing-cursor-y: 35vh;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html:has(.landing-page) {
+    scroll-behavior: smooth;
+  }
+}
+
+.landing-cursor-glow {
+  background: radial-gradient(
+    720px circle at var(--landing-cursor-x) var(--landing-cursor-y),
+    rgba(255, 45, 45, 0.14),
+    transparent 42%
+  );
+}
+
+.landing-check-path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.landing-nav-anchor {
+  background: linear-gradient(currentColor, currentColor) 0 100% / 0 1px no-repeat;
+  transition:
+    background-size 0.28s ease,
+    color 0.2s ease;
+}
+.landing-nav-anchor:hover {
+  background-size: 100% 1px;
+}
+
+.landing-footer-link {
+  background: linear-gradient(currentColor, currentColor) 0 100% / 0 1px no-repeat;
+  transition:
+    background-size 0.28s ease,
+    color 0.2s ease;
+}
+.landing-footer-link:hover {
+  background-size: 100% 1px;
+}
+
+.landing-metric-float {
+  animation: landing-metric-float 5.5s ease-in-out infinite;
+  will-change: transform;
+}
+.landing-metric-float:nth-child(2) {
+  animation-delay: 0.4s;
+}
+.landing-metric-float:nth-child(3) {
+  animation-delay: 0.8s;
+}
+
+@keyframes landing-metric-float {
+  0%,
+  100% {
+    transform: translateY(0) translateZ(0);
+  }
+  50% {
+    transform: translateY(-5px) translateZ(0);
+  }
+}
+
+.landing-metric-cell {
+  transition:
+    text-shadow 0.25s ease,
+    filter 0.25s ease;
+}
+.landing-metric-cell:hover .font-mono {
+  text-shadow: 0 0 28px rgba(255, 45, 45, 0.45);
+}
+
+.landing-card-how-icon {
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  will-change: transform;
+}
+.group:hover .landing-card-how-icon {
+  transform: rotate(-8deg) scale(1.1) translateZ(0);
+}
+
+.landing-int-wrap {
+  perspective: 960px;
+}
+.landing-int-inner {
+  transform: translateZ(0) rotateX(0deg) rotateY(0deg);
+  transition:
+    transform 0.18s ease-out,
+    box-shadow 0.25s ease,
+    border-color 0.25s ease;
+  will-change: transform;
+}
+.landing-int-inner:hover {
+  box-shadow:
+    0 0 36px -8px rgba(255, 45, 45, 0.45),
+    0 18px 40px -24px rgba(0, 0, 0, 0.6);
+}
+
+.landing-secured-dot {
+  box-shadow: 0 0 0 0 rgba(255, 45, 45, 0.45);
+  animation: landing-secured-pulse 2s ease-out infinite;
+}
+@keyframes landing-secured-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 45, 45, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(255, 45, 45, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 45, 45, 0);
+  }
+}
+
+.landing-preview-float {
+  animation: landing-preview-float 7s ease-in-out infinite;
+  will-change: transform;
+}
+@keyframes landing-preview-float {
+  0%,
+  100% {
+    transform: translateY(0) translateZ(0);
+  }
+  50% {
+    transform: translateY(-8px) translateZ(0);
+  }
+}
+
+.landing-scanline {
+  pointer-events: none;
+}
+.landing-scanline::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(255, 255, 255, 0.04) 48%,
+    rgba(255, 45, 45, 0.06) 50%,
+    transparent 52%
+  );
+  animation: landing-scanline-move 5.5s linear infinite;
+  will-change: transform;
+}
+@keyframes landing-scanline-move {
+  0% {
+    transform: translateY(-100%) translateZ(0);
+  }
+  100% {
+    transform: translateY(100%) translateZ(0);
+  }
+}
+
+.landing-row-blink {
+  animation: landing-row-blink 2.4s ease-in-out infinite;
+  will-change: opacity, box-shadow;
+}
+@keyframes landing-row-blink {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 transparent;
+  }
+  40% {
+    opacity: 0.82;
+    box-shadow: 0 0 16px -4px rgba(255, 45, 45, 0.2);
+  }
+  55% {
+    opacity: 1;
+  }
+}
+
+.landing-use-card {
+  background-image: linear-gradient(135deg, rgba(255, 45, 45, 0.06), transparent 42%);
+  background-size: 200% 200%;
+  transition:
+    background-position 0.5s ease,
+    transform 0.3s ease,
+    box-shadow 0.3s ease,
+    border-color 0.3s ease;
+  will-change: transform;
+}
+.landing-use-card:hover {
+  background-position: 100% 50%;
+  transform: translateY(-4px) scale(1.02) translateZ(0);
+  box-shadow: 0 0 40px -12px rgba(255, 45, 45, 0.35);
+}
+.landing-use-icon {
+  transition: transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.group:hover .landing-use-icon {
+  transform: scale(1.12) rotate(-6deg) translateZ(0);
+}
+
+.landing-pricing-card {
+  transition:
+    transform 0.35s ease,
+    box-shadow 0.35s ease,
+    border-color 0.35s ease;
+  will-change: transform;
+}
+.landing-pricing-card:hover {
+  transform: translateY(-4px) scale(1.02) translateZ(0);
+}
+.landing-pricing-pro {
+  animation: landing-pro-border 4s ease-in-out infinite;
+}
+@keyframes landing-pro-border {
+  0%,
+  100% {
+    box-shadow:
+      0 0 48px -16px rgba(255, 45, 45, 0.35),
+      inset 0 0 0 1px rgba(255, 45, 45, 0.12);
+  }
+  50% {
+    box-shadow:
+      0 0 56px -10px rgba(255, 45, 45, 0.5),
+      inset 0 0 0 1px rgba(255, 45, 45, 0.2);
+  }
+}
+
+.landing-cta-pulse {
+  animation: landing-cta-glow 2.2s ease-in-out infinite;
+}
+@keyframes landing-cta-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 24px -4px rgba(255, 45, 45, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 44px 2px rgba(255, 45, 45, 0.75);
+  }
+}
+
+.landing-mid-cta-shell {
+  background-image: linear-gradient(
+    120deg,
+    rgba(255, 45, 45, 0.12),
+    rgba(255, 255, 255, 0.04) 35%,
+    rgba(255, 45, 45, 0.08) 70%,
+    rgba(255, 255, 255, 0.03)
+  );
+  background-size: 240% 240%;
+  animation: landing-grad-shift 10s ease infinite;
+}
+@keyframes landing-grad-shift {
+  0% {
+    background-position: 0% 40%;
+  }
+  50% {
+    background-position: 100% 60%;
+  }
+  100% {
+    background-position: 0% 40%;
+  }
+}
+
+.landing-final-cta {
+  background-size: 200% 200%;
+  animation: landing-final-grad 12s ease infinite;
+}
+@keyframes landing-final-grad {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.landing-engine-rail {
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: 0.35rem;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, rgba(255, 45, 45, 0.35), transparent);
+  overflow: hidden;
+  opacity: 0.85;
+  pointer-events: none;
+}
+.landing-engine-dot {
+  position: absolute;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 999px;
+  background: #ff2d2d;
+  box-shadow: 0 0 14px rgba(255, 45, 45, 0.9);
+  animation: landing-engine-dot-x 3.8s linear infinite;
+  will-change: left;
+}
+@keyframes landing-engine-dot-x {
+  0% {
+    left: 0;
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    left: calc(100% - 7px);
+    opacity: 0.85;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-metric-float,
+  .landing-preview-float,
+  .landing-scanline::after,
+  .landing-row-blink,
+  .landing-secured-dot,
+  .landing-cta-pulse,
+  .landing-mid-cta-shell,
+  .landing-final-cta,
+  .landing-engine-dot,
+  .landing-pricing-pro {
+    animation: none !important;
+  }
+  .landing-use-card:hover,
+  .landing-pricing-card:hover {
+    transform: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .landing-metric-float,
+  .landing-preview-float,
+  .landing-engine-dot {
+    animation: none;
+  }
+}
+
+/* —— Waitlist hero (UI component) —— */
+.waitlist-hero-perspective {
+  perspective: 1200px;
+  transform: perspective(1200px) rotateX(15deg);
+  transform-origin: center bottom;
+}
+
+@keyframes waitlist-spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.waitlist-hero-spin-slow {
+  animation: waitlist-spin-slow 60s linear infinite;
+}
+
+@keyframes waitlist-spin-slow-reverse {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-360deg);
+  }
+}
+.waitlist-hero-spin-slow-reverse {
+  animation: waitlist-spin-slow-reverse 60s linear infinite;
+}
+
+@keyframes waitlist-bounce-in {
+  0% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.waitlist-hero-bounce-in {
+  animation: waitlist-bounce-in 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+
+@keyframes waitlist-success-pulse {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  70% {
+    transform: scale(0.95);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.waitlist-hero-success-pulse {
+  animation: waitlist-success-pulse 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+
+@keyframes waitlist-success-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 20px rgba(16, 185, 129, 0.4);
+  }
+  50% {
+    box-shadow:
+      0 0 60px rgba(16, 185, 129, 0.8),
+      0 0 100px rgba(16, 185, 129, 0.4);
+  }
+}
+.waitlist-hero-success-glow {
+  animation: waitlist-success-glow 2s ease-in-out infinite;
+}
+
+@keyframes waitlist-checkmark-draw {
+  0% {
+    stroke-dashoffset: 24;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+.waitlist-hero-checkmark {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: waitlist-checkmark-draw 0.4s ease-out 0.3s forwards;
+}
+
+@keyframes waitlist-celebration-ring {
+  0% {
+    transform: translate(-50%, -50%) scale(0.8);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2);
+    opacity: 0;
+  }
+}
+.waitlist-hero-ring {
+  animation: waitlist-celebration-ring 0.8s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waitlist-hero-spin-slow,
+  .waitlist-hero-spin-slow-reverse,
+  .waitlist-hero-success-glow,
+  .waitlist-hero-ring {
+    animation: none !important;
+  }
+}
