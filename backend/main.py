@@ -348,11 +348,18 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
+        stale: List[WebSocket] = []
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(message)
+            except Exception:
+                stale.append(connection)
+        for connection in stale:
+            self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -1304,7 +1311,19 @@ async def run_test(test_type: str, request: Request, actor: str = "Admin"):
     allowed_types = {
         "oauth": "attacker_sim/oauth_attack.py",
         "credential": "attacker_sim/cred_dump.py",
-        "supply_chain": "attacker_sim/supply_chain.py"
+        "supply_chain": "attacker_sim/supply_chain.py",
+        "mcp": "attacker_sim/mcp_tool_exfil.py",
+        "webhook": "attacker_sim/webhook_abuse.py",
+        "maintainer": "attacker_sim/maintainer_hijack.py",
+        "agent_memory": "attacker_sim/agent_memory_dump.py",
+        "prompt_injection": "attacker_sim/prompt_injection.py",
+        "data_exfiltration": "attacker_sim/data_exfiltration.py",
+        "privilege_escalation": "attacker_sim/privilege_escalation.py",
+        "ssrf": "attacker_sim/ssrf_attack.py",
+        "token_replay": "attacker_sim/token_replay.py",
+        "ransomware": "attacker_sim/ransomware_pattern.py",
+        "dns_exfiltration": "attacker_sim/dns_exfiltration.py",
+        "container_escape": "attacker_sim/container_escape.py",
     }
     
     if LIGHT_MODE:
@@ -1873,9 +1892,13 @@ async def _incident_relay():
     logger.info("incident_relay_started channel=%s", INCIDENT_CHANNEL)
     try:
         while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message and message.get("type") == "message":
-                await manager.broadcast(message["data"])
+            try:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message.get("type") == "message":
+                    await manager.broadcast(message["data"])
+            except Exception:
+                logger.exception("incident_relay_loop_error")
+                await asyncio.sleep(0.2)
     finally:
         await pubsub.unsubscribe(INCIDENT_CHANNEL)
         await pubsub.aclose()

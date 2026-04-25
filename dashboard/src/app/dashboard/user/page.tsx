@@ -2,12 +2,32 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { Activity, AlertTriangle, Bot, Globe, Shield, Workflow } from "lucide-react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { UserDashboardCharts } from "@/components/dashboard/UserDashboardCharts"
 import { useRequireAuth } from "@/hooks/useRequireAuth"
 import { apiFetch } from "@/lib/api"
+import {
+  MOCK_ALERT_DETAILS,
+  MOCK_INTEGRATION_LABELS,
+  MOCK_USER_ALERTS,
+  MOCK_USER_AUTOMATIONS,
+  MOCK_USER_INTEGRATIONS,
+  MOCK_USER_RISK,
+  MOCK_USER_SUMMARY,
+  MOCK_USER_TIMELINE,
+} from "@/lib/user-dashboard-mock-data"
+import { getIntegrationService, INTEGRATION_SERVICES } from "@/lib/user-dashboard-integration-services"
 
 type TimelineItem = {
   timestamp: number
@@ -70,6 +90,72 @@ function formatTime(ts: number) {
   return new Date((ts || 0) * 1000).toLocaleString()
 }
 
+function isSummaryEmpty(s: Summary) {
+  return s.actions_today === 0 && s.blocked === 0 && s.warnings === 0 && s.safe === 0
+}
+
+function mockAlertsForFilter(severity: string): UserAlert[] {
+  if (severity === "all") return MOCK_USER_ALERTS
+  return MOCK_USER_ALERTS.filter((a) => a.severity === severity)
+}
+
+function mergeUserDashboardState(
+  severityFilter: string,
+  timelineData: { items?: TimelineItem[] },
+  alertsData: { alerts?: UserAlert[] },
+  riskData: { score?: number; band?: string; factors?: Record<string, number> },
+  automationsData: {
+    automations?: Automation[]
+    summary?: Summary
+    integrations?: string[]
+  },
+  integrationsData: { integrations?: Integration[] },
+) {
+  const apiTimeline = timelineData.items || []
+  const apiAlerts = alertsData.alerts || []
+  const apiAutomations = automationsData.automations || []
+  const apiSummary = automationsData.summary || {
+    actions_today: 0,
+    blocked: 0,
+    warnings: 0,
+    safe: 0,
+  }
+  const apiIntegrationsList = automationsData.integrations || []
+  const apiIntegrationsRows = integrationsData.integrations || []
+
+  const timeline = apiTimeline.length > 0 ? apiTimeline : MOCK_USER_TIMELINE
+  const alerts = apiAlerts.length > 0 ? apiAlerts : mockAlertsForFilter(severityFilter)
+  const automations = apiAutomations.length > 0 ? apiAutomations : MOCK_USER_AUTOMATIONS
+  const summary = isSummaryEmpty(apiSummary) ? MOCK_USER_SUMMARY : apiSummary
+  const factors = riskData.factors || {}
+  const risk: RiskData =
+    (riskData.score ?? 0) > 0 || Object.keys(factors).length > 0
+      ? { score: riskData.score ?? 0, band: riskData.band || "low", factors }
+      : MOCK_USER_RISK
+  const integrations = apiIntegrationsList.length > 0 ? apiIntegrationsList : MOCK_INTEGRATION_LABELS
+  const integrationsRows = apiIntegrationsRows.length > 0 ? apiIntegrationsRows : MOCK_USER_INTEGRATIONS
+
+  const usingMock =
+    apiTimeline.length === 0 ||
+    apiAlerts.length === 0 ||
+    apiAutomations.length === 0 ||
+    isSummaryEmpty(apiSummary) ||
+    ((riskData.score ?? 0) === 0 && Object.keys(factors).length === 0) ||
+    apiIntegrationsList.length === 0 ||
+    apiIntegrationsRows.length === 0
+
+  return {
+    timeline,
+    alerts,
+    automations,
+    summary,
+    risk,
+    integrations,
+    integrationsRows,
+    usingMock,
+  }
+}
+
 export default function UserDashboardPage() {
   const { user, loading: authLoading, authorized } = useRequireAuth()
   const [timeline, setTimeline] = useState<TimelineItem[]>([])
@@ -97,6 +183,7 @@ export default function UserDashboardPage() {
     automation_alerts: true,
   })
   const [loading, setLoading] = useState(true)
+  const [usingMockData, setUsingMockData] = useState(false)
 
   const load = async () => {
     const userQuery = new URLSearchParams()
@@ -118,13 +205,22 @@ export default function UserDashboardPage() {
     const integrationsData = await integrationsRes.json()
     const prefsData = await prefsRes.json()
 
-    setTimeline(timelineData.items || [])
-    setAlerts(alertsData.alerts || [])
-    setRisk({ score: riskData.score || 0, band: riskData.band || "low", factors: riskData.factors || {} })
-    setAutomations(automationsData.automations || [])
-    setIntegrations(automationsData.integrations || [])
-    setSummary(automationsData.summary || { actions_today: 0, blocked: 0, warnings: 0, safe: 0 })
-    setIntegrationsData(integrationsData.integrations || [])
+    const merged = mergeUserDashboardState(
+      severityFilter,
+      timelineData,
+      alertsData,
+      riskData,
+      automationsData,
+      integrationsData,
+    )
+    setTimeline(merged.timeline)
+    setAlerts(merged.alerts)
+    setRisk(merged.risk)
+    setAutomations(merged.automations)
+    setIntegrations(merged.integrations)
+    setSummary(merged.summary)
+    setIntegrationsData(merged.integrationsRows)
+    setUsingMockData(merged.usingMock)
     setPrefs({
       email_enabled: Boolean(prefsData.email_enabled),
       critical_only: Boolean(prefsData.critical_only),
@@ -171,6 +267,12 @@ export default function UserDashboardPage() {
     return "bg-green-500"
   }, [risk.score])
 
+  const selectedIntegrationService = useMemo(
+    () => getIntegrationService(integrationForm.type),
+    [integrationForm.type],
+  )
+  const IntegrationServiceIcon = selectedIntegrationService.icon
+
   if (authLoading || !authorized) {
     return (
       <div className="min-h-screen bg-background text-foreground p-6 md:p-8">
@@ -186,6 +288,10 @@ export default function UserDashboardPage() {
 
   const openAlertDetails = async (alert: UserAlert) => {
     setSelectedAlert(alert)
+    if (alert.id.startsWith("mock_")) {
+      setSelectedAlertDetails({ ...MOCK_ALERT_DETAILS, id: alert.id, summary: alert.summary, timestamp: alert.timestamp })
+      return
+    }
     const res = await apiFetch(`/api/v1/user/alerts/${alert.id}`)
     if (res.ok) setSelectedAlertDetails(await res.json())
   }
@@ -202,6 +308,7 @@ export default function UserDashboardPage() {
   }
 
   const removeIntegration = async (id: string) => {
+    if (id.startsWith("mock_")) return
     const res = await apiFetch(`/api/v1/user/integrations/${id}`, { method: "DELETE" })
     if (!res.ok) return
     await load()
@@ -233,6 +340,12 @@ export default function UserDashboardPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">My Security Dashboard</h1>
           <p className="text-muted-foreground">What you did and what SentinelMesh did in response.</p>
+          {usingMockData && (
+            <p className="mt-2 max-w-2xl text-xs text-amber-600/90 dark:text-amber-400/90">
+              Sample data is shown where the API returned empty values — your live metrics will replace this once events
+              exist for your account.
+            </p>
+          )}
         </div>
       </header>
 
@@ -242,6 +355,8 @@ export default function UserDashboardPage() {
         <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Warnings</div><div className="text-2xl font-bold text-yellow-500">{summary.warnings}</div></CardContent></Card>
         <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Safe</div><div className="text-2xl font-bold text-green-500">{summary.safe}</div></CardContent></Card>
       </section>
+
+      <UserDashboardCharts summary={summary} />
 
       <section className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -311,27 +426,56 @@ export default function UserDashboardPage() {
 
       <section className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
-          <CardHeader><CardTitle>🔌 Connect Automation</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <Input placeholder="Automation Name" value={integrationForm.name} onChange={(e) => setIntegrationForm((s) => ({ ...s, name: e.target.value }))} />
-              <select
-                value={integrationForm.type}
-                onChange={(e) => setIntegrationForm((s) => ({ ...s, type: e.target.value as Integration["type"] }))}
-                className="h-10 rounded-md border border-border bg-background px-3 text-sm"
-              >
-                <option value="n8n">n8n</option>
-                <option value="api">API</option>
-                <option value="chrome">Chrome</option>
-                <option value="mcp">MCP</option>
-              </select>
-              <Input
-                placeholder="Webhook URL / Endpoint"
-                value={integrationForm.endpoint}
-                onChange={(e) => setIntegrationForm((s) => ({ ...s, endpoint: e.target.value }))}
-                className="md:col-span-2"
-              />
-              <label className="flex items-center gap-2 text-sm">
+          <CardHeader>
+            <CardTitle>🔌 Connect Automation</CardTitle>
+            <CardDescription>
+              Pick the kind of system you are wiring to SentinelMesh. Each option expects a different URL or identifier in
+              the endpoint field — see the note below for your current selection.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="integration-name">Automation name</Label>
+                <Input
+                  id="integration-name"
+                  placeholder="e.g. Sales webhook prod"
+                  value={integrationForm.name}
+                  onChange={(e) => setIntegrationForm((s) => ({ ...s, name: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Service type</Label>
+                <Select
+                  value={integrationForm.type}
+                  onValueChange={(value) => {
+                    if (value === "n8n" || value === "api" || value === "chrome" || value === "mcp") {
+                      setIntegrationForm((s) => ({ ...s, type: value }))
+                    }
+                  }}
+                >
+                  <SelectTrigger size="default" className="h-10 w-full min-w-0 max-w-full">
+                    <SelectValue placeholder="Choose a service" />
+                  </SelectTrigger>
+                  <SelectContent align="start" className="min-w-[var(--anchor-width)]">
+                    {INTEGRATION_SERVICES.map((svc) => (
+                      <SelectItem key={svc.type} value={svc.type}>
+                        {svc.label} — {svc.summary}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <Label htmlFor="integration-endpoint">Endpoint URL or identifier</Label>
+                <Input
+                  id="integration-endpoint"
+                  placeholder={selectedIntegrationService.endpointPlaceholder}
+                  value={integrationForm.endpoint}
+                  onChange={(e) => setIntegrationForm((s) => ({ ...s, endpoint: e.target.value }))}
+                />
+              </div>
+              <label className="flex items-center gap-2 text-sm md:col-span-2">
                 <input
                   type="checkbox"
                   checked={integrationForm.enabled}
@@ -339,6 +483,17 @@ export default function UserDashboardPage() {
                 />
                 Enabled
               </label>
+            </div>
+            <div className="rounded-lg border border-border/80 bg-muted/40 p-4 text-sm">
+              <p className="flex items-center gap-2 font-medium text-foreground">
+                <IntegrationServiceIcon className="size-4 shrink-0 text-primary" aria-hidden />
+                Using <span className="text-primary">{selectedIntegrationService.label}</span>
+              </p>
+              <p className="mt-2 leading-relaxed text-muted-foreground">{selectedIntegrationService.howUsersUseIt}</p>
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                <span className="font-medium text-foreground/90">Endpoint field: </span>
+                {selectedIntegrationService.endpointHelp}
+              </p>
             </div>
             <Button onClick={createIntegration}>Save Integration</Button>
             <div className="space-y-2">
