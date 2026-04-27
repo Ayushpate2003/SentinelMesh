@@ -14,7 +14,6 @@ import { RealtimeEngineSection } from "@/components/landing/sections/RealtimeEng
 import { UseCasesSection } from "@/components/landing/sections/UseCasesSection"
 import { PricingSection } from "@/components/landing/sections/PricingSection"
 import { MidCtaSection } from "@/components/landing/sections/MidCtaSection"
-import { WaitlistSection } from "@/components/landing/sections/WaitlistSection"
 import { FinalCtaSection } from "@/components/landing/sections/FinalCtaSection"
 import { LandingFooter } from "@/components/landing/sections/LandingFooter"
 import { setupLandingScrollAnimations } from "@/components/landing/motion/landingScroll"
@@ -98,7 +97,6 @@ export function LandingView() {
         <UseCasesSection />
         <PricingSection reduceMotion={reduceMotion} narrow={narrow} />
         <MidCtaSection reduceMotion={reduceMotion} narrow={narrow} />
-        <WaitlistSection />
         <FinalCtaSection reduceMotion={reduceMotion} narrow={narrow} />
         <LandingFooter />
       </div>
