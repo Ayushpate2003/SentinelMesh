@@ -25,10 +25,10 @@ function useLanAwareBackend(): boolean {
 }
 
 function normalizeDockerInternalUrl(url: string): string {
-  if (url.includes("backend:8002")) {
+  if (url.includes("backend:8002") || url.includes("backend-full:8002")) {
     return url
-      .replace(/http:\/\/backend:8002/g, `http://localhost:${API_PORT}`)
-      .replace(/ws:\/\/backend:8002/g, `ws://localhost:${API_PORT}`)
+      .replace(/http:\/\/backend(-full)?:8002/g, `http://localhost:${API_PORT}`)
+      .replace(/ws:\/\/backend(-full)?:8002/g, `ws://localhost:${API_PORT}`)
   }
   return url
 }

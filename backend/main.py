@@ -389,10 +389,12 @@ async def request_metrics_middleware(request: Request, call_next):
     request.state.request_id = req_id
 
     ip = request.client.host if request.client else "unknown"
+
     endpoint_key = f"ratelimit:endpoint:{ip}:{request.url.path}:{int(time.time() // 60)}"
     global_key = f"ratelimit:ip:{ip}:{int(time.time() // 60)}"
 
-    if redis_client:
+    is_local = ip in {"127.0.0.1", "localhost", "::1"}
+    if redis_client and not is_local:
         global_count = await redis_client.incr(global_key)
         if global_count == 1:
             await redis_client.expire(global_key, 70)
@@ -749,7 +751,7 @@ async def auth_google_callback(request: Request, code: str = "", state: str = ""
     auth_response = await _create_auth_response(user, request)
     redirect_path = "/dashboard/user"
     if user.get("role") == "ADMIN":
-        redirect_path = "/"
+        redirect_path = "/admin"
     elif next_path.startswith("/"):
         redirect_path = next_path
     auth_response.status_code = 302
@@ -1156,11 +1158,74 @@ async def ingest_event(request: Request, event_data: Dict[str, Any]):
                             )
                 finally:
                     await db.close()
-            await _publish_user_event(
-                user_id,
-                "automation_blocked",
-                {"integration_id": integration_id, "action": event_action, "risk_score": risk_score, "decision": ai_decision},
+        # Record the blocked attempt as an incident so it shows up in the dashboard
+        incident_id = f"inc_{uuid.uuid4().hex[:16]}"
+        created_at = time.time()
+        severity = "critical" if risk_score >= 85 else "high"
+        summary = f"Security Incident: {event_action} anomaly from {source_name}"
+        timeline = [
+            {
+                "ts": created_at,
+                "message": "Event blocked by SentinelMesh policy engine",
+                "stage": "policy",
+            }
+        ]
+        signal = {
+            "signal_id": f"sig_{uuid.uuid4().hex[:10]}",
+            "agent_name": "Gatekeeper",
+            "severity": severity,
+            "description": f"Policy matched high-risk pattern for action '{event_action}'",
+            "risk_score": round(risk_score / 100.0, 2),
+            "metadata": sanitized_metadata,
+        }
+        db = await get_db()
+        try:
+            await db.execute(
+                """
+                INSERT INTO incidents (incident_id, summary, severity, status, created_at, user_id, outcome, signals, affected_components, timeline)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    incident_id,
+                    summary,
+                    severity,
+                    "blocked",
+                    created_at,
+                    user_id,
+                    "BLOCK",
+                    json.dumps([signal]),
+                    json.dumps([source_name]),
+                    json.dumps(timeline),
+                ),
             )
+            await db.commit()
+        finally:
+            await db.close()
+
+        if redis_client:
+            await redis_client.publish(
+                INCIDENT_CHANNEL,
+                json.dumps(
+                    {
+                        "incident_id": incident_id,
+                        "summary": summary,
+                        "severity": severity,
+                        "status": "blocked",
+                        "created_at": created_at,
+                        "user_id": user_id,
+                        "outcome": "BLOCK",
+                        "signals": [signal],
+                        "affected_components": [source_name],
+                        "timeline": timeline,
+                    }
+                ),
+            )
+
+        await _publish_user_event(
+            user_id,
+            "automation_blocked",
+            {"integration_id": integration_id, "action": event_action, "risk_score": risk_score, "decision": ai_decision, "incident_id": incident_id},
+        )
         raise HTTPException(status_code=403, detail="Automation blocked by SentinelMesh policy engine")
 
     event_id = event_data.get("event_id") or f"evt_{uuid.uuid4().hex[:16]}"
@@ -1370,8 +1435,8 @@ async def run_test(test_type: str, request: Request, actor: str = "Admin"):
     process = subprocess.Popen(
         ["python", script_path],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        stdout=None, # Pipe to parent stdout for visibility in docker logs
+        stderr=None
     )
     
     running_tests[test_type] = process

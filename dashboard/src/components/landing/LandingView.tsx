@@ -19,12 +19,26 @@ import { LandingFooter } from "@/components/landing/sections/LandingFooter"
 import { setupLandingScrollAnimations } from "@/components/landing/motion/landingScroll"
 import { useLandingMotionPreferences } from "@/hooks/useLandingMotionPreferences"
 import { cn } from "@/lib/utils"
+import { useAuth } from "@/context/AuthContext"
+import { useRouter } from "next/navigation"
 
 const GLSLHills = dynamic(() => import("@/components/ui/glsl-hills").then((m) => m.GLSLHills), { ssr: false })
 
 export function LandingView() {
   const rootRef = useRef<HTMLDivElement>(null)
   const { reduceMotion, narrow } = useLandingMotionPreferences()
+  const { user, loading: authLoading } = useAuth()
+  const router = useRouter()
+
+  useEffect(() => {
+    if (!authLoading && user) {
+      if (user.role === "ADMIN") {
+        router.replace("/admin")
+      } else {
+        router.replace("/dashboard/user")
+      }
+    }
+  }, [user, authLoading, router])
 
   useEffect(() => {
     let reverted = false

@@ -19,6 +19,9 @@ import {
   AlertTriangle,
   LayoutDashboard,
   Waves,
+  Mail,
+  Fingerprint,
+  UserCircle2,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { getWsBaseUrl } from "@/lib/constants"
@@ -45,7 +48,7 @@ const ATTACK_SIMULATIONS: { id: string; label: string }[] = [
 ]
 
 export default function AdminConsolePage() {
-  const { loading: authLoading, authorized } = useRequireAuth("ADMIN")
+  const { user, loading: authLoading, authorized } = useRequireAuth("ADMIN")
   const { incidents, addIncident, setIncidents } = useDashboardStore()
   /** null = not checked yet; REST health is the source of truth for “connected”. */
   const [apiHealthy, setApiHealthy] = useState<boolean | null>(null)
@@ -373,6 +376,35 @@ export default function AdminConsolePage() {
 
           <main className="grid grid-cols-1 gap-5 xl:items-start xl:grid-cols-[320px_minmax(0,1fr)]">
             <section className="space-y-4">
+              <div data-admin-card className="sm-panel p-4">
+                <h2 className="sm-h3 mb-3 flex items-center gap-2">
+                  <UserCircle2 className="h-4 w-4 text-[#9CA3AF]" />
+                  Profile
+                </h2>
+                <div className="space-y-2 sm-body text-[#9CA3AF]">
+                  <div className="rounded-md bg-black/20 px-3 py-2">
+                    <p className="sm-caption mb-1 uppercase tracking-wider text-[#9CA3AF]">Email</p>
+                    <p className="break-all text-[#E5E7EB]">
+                      <Mail className="mr-1 inline h-3.5 w-3.5 opacity-70" />
+                      {user?.email || "N/A"}
+                    </p>
+                  </div>
+                  <div className="rounded-md bg-black/20 px-3 py-2">
+                    <p className="sm-caption mb-1 uppercase tracking-wider text-[#9CA3AF]">Role</p>
+                    <Badge variant="outline" className="border-white/20 bg-white/5 text-[#E5E7EB]">
+                      {user?.role || "ADMIN"}
+                    </Badge>
+                  </div>
+                  <div className="rounded-md bg-black/20 px-3 py-2">
+                    <p className="sm-caption mb-1 uppercase tracking-wider text-[#9CA3AF]">User ID</p>
+                    <p className="break-all font-mono text-xs text-[#E5E7EB]">
+                      <Fingerprint className="mr-1 inline h-3.5 w-3.5 opacity-70" />
+                      {user?.id || "N/A"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               <div data-admin-card className="sm-panel p-4">
                 <h2 className="sm-h3 mb-3">Active Agents</h2>
                 <div className="space-y-2 sm-body text-[#9CA3AF]">

@@ -105,22 +105,26 @@ class Supervisor:
         )
 
 if __name__ == "__main__":
-    # Test Supervisor
-    supervisor = Supervisor()
-    test_event = {
-        "event_id": "test_456",
-        "timestamp": time.time(),
-        "source": "ci-runner-01",
-        "event_type": "oauth_request",
-        "metadata": {
-            "scopes": ["https://www.googleapis.com/auth/drive", "*"],
-            "project_id": "proj_alpha"
+    run_self_test = os.getenv("SUPERVISOR_SELF_TEST", "false").lower() == "true"
+    if run_self_test:
+        # Optional local self-test only.
+        supervisor = Supervisor()
+        test_event = {
+            "event_id": "test_456",
+            "timestamp": time.time(),
+            "source": "ci-runner-01",
+            "event_type": "oauth_request",
+            "metadata": {
+                "scopes": ["https://www.googleapis.com/auth/drive", "*"],
+                "project_id": "proj_alpha"
+            }
         }
-    }
-    incident = supervisor.process_event(test_event)
-    if incident:
-        print(json.dumps(incident.model_dump(), indent=2))
-    
-    print("Test complete. Staying alive...")
+        incident = supervisor.process_event(test_event)
+        if incident:
+            print(json.dumps(incident.model_dump(), indent=2))
+        print("Self-test complete. Staying alive...")
+    else:
+        logger.info("core.supervisor started without self-test (SUPERVISOR_SELF_TEST=false).")
+
     while True:
         time.sleep(3600)
